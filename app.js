@@ -588,6 +588,9 @@ function resetNoteOnly() {
 
 // ====== network ======
 async function postJson(url, payload, timeoutMs = 10000) {
+  const measureStart = performance.now();
+  let measuredServer = null;
+  let measuredOutcome = 'error';
   // ✅ 毎回 accessToken を付ける（userIdは送ってもいいけど信用されない想定）
   if (window.liff && liff.isLoggedIn && liff.isLoggedIn()) {
     payload.accessToken = liff.getAccessToken();
@@ -611,15 +614,21 @@ async function postJson(url, payload, timeoutMs = 10000) {
     } catch {
       throw new Error(`JSON parse failed: ${text.slice(0, 200)}`);
     }
+    measuredServer = data?._timing || null;
+    measuredOutcome = data?.ok ? 'ok' : 'api_error';
     return { status: res.status, data };
   } catch (e) {
     // ✅ 中断は「よくある」ので静かに扱う
     if (e?.name === "AbortError") {
+      measuredOutcome = 'timeout';
       return { status: 0, data: null, aborted: true };
     }
     throw e;
   } finally {
     clearTimeout(timer);
+    if (payload.action === 'getSlots') {
+      showReservationTiming_(payload.ym, performance.now() - measureStart, measuredServer, measuredOutcome);
+    }
   }
 }
 
@@ -1805,3 +1814,28 @@ setupSwipeBack();
 // ====== safety net: loading解除 ======
 window.addEventListener("unhandledrejection", () => setLoading(false));
 window.addEventListener("error", () => setLoading(false));
+
+// Temporary diagnostics for the demo: last eight network requests only.
+const reservationTimingRows_ = [];
+function showReservationTiming_(ym, elapsed, server, outcome) {
+  const ms = server?.ms || {};
+  const sec = value => Number.isFinite(value) ? (value / 1000).toFixed(2) + '秒' : '未取得';
+  const text = `${ym} / ${outcome} / 月キャッシュ:${server?.slotsCache || '不明'}\n通信全体:${sec(elapsed)}　API内部:${sec(ms.apiTotal)}\n本人確認:${sec(ms.authentication)}　祝日:${sec(ms.holidays)}\n除外日:${sec(ms.excludedDates)}　予定取得:${sec(ms.busyCalendars)}\n空き枠その他:${sec(ms.slotsOther)}`;
+  reservationTimingRows_.push(text);
+  if (reservationTimingRows_.length > 8) reservationTimingRows_.shift();
+  console.info('RESERVATION_TIMING', { ym, elapsedMs: Math.round(elapsed), outcome, server });
+  let panel = document.getElementById('reservationTimingPanel');
+  if (!panel) {
+    panel = document.createElement('details');
+    panel.id = 'reservationTimingPanel';
+    panel.style.cssText = 'margin:12px 0;padding:10px;background:#fff8db;border:1px solid #dccb89;border-radius:8px;font-size:12px;';
+    const summary = document.createElement('summary');
+    summary.textContent = '計測結果（デモ検証用・タップで開く）';
+    const pre = document.createElement('pre');
+    pre.style.cssText = 'white-space:pre-wrap;overflow-wrap:anywhere;font:inherit;user-select:text;';
+    panel.append(summary, pre);
+    const calendar = document.getElementById('calendar');
+    if (calendar) calendar.insertAdjacentElement('afterend', panel);
+  }
+  if (panel) panel.querySelector('pre').textContent = reservationTimingRows_.join('\n\n');
+}
