@@ -521,31 +521,14 @@ function handleRestoreReservation_(body) {
       return { ok: false, message: "status_not_cancelled" };
     }
 
-    // 日付＆時間帯を start/end に
     const ymd = toYmd_(dateStr);
-    if (!ymd) return { ok: false, message: "date_invalid" };
-
-    if (!timeRange.includes("〜")) return { ok: false, message: "time_invalid" };
-    const [a, b] = timeRange.split("〜");
-    const [sh, sm] = a.split(":");
-    const [eh, em] = b.split(":");
-    if (!sh || !sm || !eh || !em) return { ok: false, message: "time_invalid" };
-
-    const start = new Date(`${ymd}T${String(sh).padStart(2, "0")}:${String(sm).padStart(2, "0")}:00+09:00`);
-    const end = new Date(`${ymd}T${String(eh).padStart(2, "0")}:${String(em).padStart(2, "0")}:00+09:00`);
-
-    // 1msバッファ（境界ズレ吸収）
-    const start2 = new Date(start.getTime() + 1);
-    const end2 = new Date(end.getTime() - 1);
-
-    // ① 空きチェック（メイン＋追加）
-    const ids = [CALENDAR_ID].concat(ADDITIONAL_CALENDAR_IDS || []);
-    for (const id of ids) {
-      const calX = CalendarApp.getCalendarById(id);
-      if (!calX) continue;
-      const evs = calX.getEvents(start2, end2);
-      if (evs.length > 0) return { ok: false, message: "slot_already_reserved" };
-    }
+    const parsed = parseSlotId_(`${ymd.replaceAll('-', '')}_${timeRange}`);
+    if (!parsed.ok) return parsed;
+    const { start, end } = parsed;
+    const ruleCheck = validateReservationRules_(parsed, userId, values);
+    if (!ruleCheck.ok) return ruleCheck;
+    const busy = getVerifiedReservationBusy_(start, end);
+    if (busy.length > 0) return { ok: false, message: 'slot_already_reserved' };
 
     // ② イベント作り直し（メイン）
     const cal = CalendarApp.getCalendarById(CALENDAR_ID);
@@ -634,8 +617,11 @@ function handleCreateReservation_(body) {
   try {
     lock.waitLock(10000); // 10秒まで待つ
 
-    // 1) 空きチェック（Freebusy）※ロック後に必ず再チェック
-    const busy = getBusySlots(start2, end2, { force: true });
+    const ruleCheck = validateReservationRules_(parsed, userId);
+    if (!ruleCheck.ok) return ruleCheck;
+
+    // Required calendars must all be readable; use fresh data under the lock.
+    const busy = getVerifiedReservationBusy_(start, end);
     if (busy.some(ev => start2 < ev.end && end2 > ev.start)) {
       return { ok: false, message: "slot_already_reserved" };
     }
@@ -807,39 +793,20 @@ function handleMyReservations_(body) {
  * - 例: "20260105_09:00〜11:00" / "20260105_13:30〜15:00"
  */
 function parseSlotId_(slotId) {
-  const m = String(slotId || "").trim().match(/^(\d{8})_(.+)$/);
-  if (!m) return { ok: false, message: "slotId_invalid", slotId };
-
-  const ymd = m[1];
-  const timeRange = String(m[2] || "").trim(); // "09:00〜11:00"
-
-  const y = Number(ymd.slice(0, 4));
-  const mo = Number(ymd.slice(4, 6)) - 1;
-  const d = Number(ymd.slice(6, 8));
-
-  if (!timeRange.includes("〜")) return { ok: false, message: "time_invalid", slotId };
-
-  const [a, b] = timeRange.split("〜");
-  const [sh, sm] = String(a || "").split(":");
-  const [eh, em] = String(b || "").split(":");
-
-  const shN = parseInt(sh, 10), smN = parseInt(sm, 10);
-  const ehN = parseInt(eh, 10), emN = parseInt(em, 10);
-
-  if ([shN, smN, ehN, emN].some(n => Number.isNaN(n))) {
-    return { ok: false, message: "time_invalid", slotId };
+  const match = String(slotId || '').trim().match(/^(\d{4})(\d{2})(\d{2})_(\d{2}):(\d{2})〜(\d{2}):(\d{2})$/);
+  if (!match) return reservationRuleError_('slot_invalid');
+  const [, yy, mm, dd, sh, sm, eh, em] = match;
+  const y = Number(yy), m = Number(mm), d = Number(dd);
+  const check = new Date(Date.UTC(y, m - 1, d));
+  if (y < 1000 || y > 9998 || check.getUTCFullYear() !== y || check.getUTCMonth() !== m - 1 || check.getUTCDate() !== d) {
+    return reservationRuleError_('date_invalid');
   }
-
-  const start = new Date(y, mo, d, shN, smN, 0);
-  const end = new Date(y, mo, d, ehN, emN, 0);
-
-  if (!(start instanceof Date) || isNaN(start.getTime())) return { ok: false, message: "date_invalid", slotId };
-  if (!(end instanceof Date) || isNaN(end.getTime())) return { ok: false, message: "date_invalid", slotId };
-  if (end <= start) return { ok: false, message: "time_invalid", slotId }; // 逆転/同一を弾く
-
-  const dateStr = Utilities.formatDate(start, "Asia/Tokyo", "yyyy/MM/dd");
-
-  return { ok: true, start, end, dateStr, timeLabel: timeRange };
+  if (Number(sh) > 23 || Number(eh) > 23 || Number(sm) > 59 || Number(em) > 59) return reservationRuleError_('slot_invalid');
+  const ymd = `${yy}-${mm}-${dd}`;
+  const start = new Date(`${ymd}T${sh}:${sm}:00+09:00`);
+  const end = new Date(`${ymd}T${eh}:${em}:00+09:00`);
+  if (end <= start) return reservationRuleError_('slot_invalid');
+  return { ok: true, start, end, ymd, dateStr: `${yy}/${mm}/${dd}`, timeLabel: `${sh}:${sm}〜${eh}:${em}` };
 }
 
 function generateReservationId_() {
@@ -968,4 +935,75 @@ function getCachedBusinessDays_(year, month, force) {
   const excluded = [...new Set(exceptions.filter(x => !x.open).map(x => x.ymd))];
   if (__measureCtx_) __measureCtx_.businessCache = 'split';
   return { holidays: rawHolidays.filter(ymd => !overrides.has(ymd)), excluded };
+}
+
+function reservationRuleError_(code) {
+  const messages = {
+    slot_invalid: '受付対象の時間帯ではありません。日付選択から選び直してください。',
+    date_invalid: '日付が正しくありません。日付選択から選び直してください。',
+    slot_started: '開始時刻を過ぎています。別の時間を選んでください。',
+    day_too_soon: '受付開始前の日付です。別の日付を選んでください。',
+    day_too_far: '受付期間外の日付です。カレンダーから選び直してください。',
+    day_closed: 'この日は予約を受け付けていません。別の日付を選んでください。',
+    reservation_limit: `ご予約はお一人様${MAX_RESERVATIONS}件までです。予約一覧をご確認ください。`,
+    rules_unavailable: '営業設定を確認できませんでした。時間をおいて再度お試しください。'
+  };
+  return { ok: false, code, message: messages[code] || '予約条件を確認できませんでした。' };
+}
+
+// Call only while holding the shared reservation script lock.
+function validateReservationRules_(parsed, userId, existingRows) {
+  if (!parsed || !parsed.ok) return reservationRuleError_('slot_invalid');
+  const now = new Date();
+  if (parsed.start.getTime() <= now.getTime()) return reservationRuleError_('slot_started');
+  const todayKey = Utilities.formatDate(now, 'Asia/Tokyo', 'yyyy-MM-dd');
+  const today = new Date(`${todayKey}T00:00:00Z`);
+  const min = new Date(today);
+  min.setUTCDate(min.getUTCDate() + Math.max(0, Number(MIN_DAYS_AHEAD) || 0));
+  const max = new Date(today);
+  // Match the existing calendar's rolling six-month display window.
+  max.setUTCMonth(max.getUTCMonth() + 6);
+  const day = new Date(`${parsed.ymd}T00:00:00Z`);
+  if (day < min) return reservationRuleError_('day_too_soon');
+  if (day > max) return reservationRuleError_('day_too_far');
+  const rule = WEEKDAY_RULES[day.getUTCDay()] || 'ok';
+  if (rule === 'none') return reservationRuleError_('day_closed');
+  let allowed;
+  if (rule === 'am') allowed = TIME_SLOTS_AM;
+  else if (rule === 'pm') allowed = TIME_SLOTS_PM;
+  else if (rule === 'ok' || rule === 'both') allowed = [].concat(TIME_SLOTS_AM || [], TIME_SLOTS_PM || []);
+  else return reservationRuleError_('day_closed');
+  if (!(allowed || []).includes(parsed.timeLabel)) return reservationRuleError_('slot_invalid');
+  try {
+    // Force fresh holiday/business reads for the final decision, not display cache.
+    const business = getCachedBusinessDays_(day.getUTCFullYear(), day.getUTCMonth() + 1, true);
+    if (business.holidays.includes(parsed.ymd) || business.excluded.includes(parsed.ymd)) return reservationRuleError_('day_closed');
+    if (Number(MAX_RESERVATIONS) > 0) {
+      let rows = existingRows;
+      if (!rows) {
+        const sheet = SpreadsheetApp.openById(SHEET_ID).getSheetByName(SHEET_NAME);
+        if (!sheet) throw new Error('Reservation sheet not found');
+        rows = sheet.getDataRange().getValues().slice(1);
+      }
+      // Count active reservations from today onward, matching the existing quota rule.
+      const count = rows.filter(row => String(row[COL.USER_ID] || '') === userId &&
+        String(row[COL.STATUS] || '') === STATUS_RESERVED && toYmd_(row[COL.DATE]) >= todayKey).length;
+      if (count >= Number(MAX_RESERVATIONS)) return reservationRuleError_('reservation_limit');
+    }
+  } catch (e) { return reservationRuleError_('rules_unavailable'); }
+  return { ok: true };
+}
+
+function getVerifiedReservationBusy_(start, end) {
+  const ids = [...new Set([CALENDAR_ID].concat(ADDITIONAL_CALENDAR_IDS || []).filter(Boolean))];
+  const busy = [];
+  for (const id of ids) {
+    const calendar = CalendarApp.getCalendarById(id);
+    if (!calendar) throw new Error('Required calendar unavailable');
+    for (const event of calendar.getEvents(start, end)) {
+      const evStart = event.getStartTime(), evEnd = event.getEndTime();
+      if (start < evEnd && end > evStart) busy.push({ start: evStart, end: evEnd });
+    }
+  }
+  return busy;
 }

@@ -10,8 +10,8 @@ document.getElementById('toggleTimingPanels')?.addEventListener('change', event 
   syncTimingPanels_();
 });
 
-// Startup measurement v20261028-08. Times start at browser navigation, not the LINE tap.
-const startupMeasure_ = { version: '20261028-08', jsStart: performance.now(), ms: {}, completed: false };
+// Startup measurement v20261028-09. Times start at browser navigation, not the LINE tap.
+const startupMeasure_ = { version: '20261028-09', jsStart: performance.now(), ms: {}, completed: false };
 async function measureStartupPhase_(name, fn) {
   const start = performance.now();
   try { return await fn(); }
@@ -814,7 +814,8 @@ function initFlatpickr() {
   }
 
   const today = new Date();
-  const minDate = today;
+  const minDate = new Date(today);
+  minDate.setHours(0, 0, 0, 0);
   const maxDate = new Date(today);
   maxDate.setMonth(maxDate.getMonth() + 6);
 
@@ -886,40 +887,7 @@ function initFlatpickr() {
     onChange: async (selectedDates) => {
       const d = selectedDates[0];
       if (!d) return;
-      const requestedDate = toYmd(d);
-      selectedDate = requestedDate;
-      selectedSlot = null;
-      const ym = toYmFromYmd(requestedDate);
-      clearSlotsUI();
-      if (slotCount) slotCount.textContent = fmtYmdJaWithDow(requestedDate);
-      if (slotsAM) slotsAM.textContent = '空き時間を確認しています…';
-      if (slotsPM) slotsPM.textContent = '空き時間を確認しています…';
-      showView('slots');
-      const epoch = viewEpoch_;
-      const isCurrent = () => epoch === viewEpoch_ && selectedDate === requestedDate && isViewVisible(viewSlots);
-      log('選んだ日の空き時間を確認しています…');
-      setCalendarLoading_(true);
-      try {
-        // Reuse the month request already running; do not add a day API call.
-        const slots = await fetchSlotsYm(ym);
-        if (!isCurrent()) return;
-        if (slots === null) throw new Error('取得できませんでした。日付選択へ戻って、もう一度お試しください。');
-        fp?.redraw?.();
-        renderSlotsForSelectedDate();
-        if (getSlotsForDate(requestedDate).length === 0) {
-          log('この日に予約できる時間はありません。別の日付を選んでください。');
-        }
-      } catch (e) {
-        if (isCurrent()) {
-          clearSlotsUI();
-          if (slotsAM) slotsAM.textContent = '取得できませんでした';
-          if (slotsPM) slotsPM.textContent = '日付選択へ戻って、もう一度お試しください';
-          log('空き時間を取得できませんでした。日付選択へ戻ってお試しください。');
-        }
-        console.error(e);
-      } finally {
-        setCalendarLoading_(false);
-      }
+      await openSlotsForDate_(toYmd(d));
     },
 
     onDayCreate: (dObj, dStr, fp, dayElem) => {
@@ -954,6 +922,41 @@ function initFlatpickr() {
       } catch {}
     },
   });
+}
+
+// Shared by calendar selection and the canceled reservation's rebook button.
+async function openSlotsForDate_(ymd, options = {}) {
+  selectedDate = ymd;
+  selectedSlot = null;
+  if (options.syncCalendar) fp?.setDate(ymd, false); // No synthetic onChange request.
+  const ym = toYmFromYmd(ymd);
+  clearSlotsUI();
+  if (slotCount) slotCount.textContent = fmtYmdJaWithDow(ymd);
+  if (slotsAM) slotsAM.textContent = '空き時間を確認しています…';
+  if (slotsPM) slotsPM.textContent = '空き時間を確認しています…';
+  showView('slots');
+  const epoch = viewEpoch_;
+  const isCurrent = () => epoch === viewEpoch_ && selectedDate === ymd && isViewVisible(viewSlots);
+  log('選んだ日の空き時間を確認しています…');
+  setCalendarLoading_(true);
+  try {
+    const slots = options.force ? await refreshSlotsYm(ym) : await fetchSlotsYm(ym);
+    if (!isCurrent()) return;
+    if (slots === null) throw new Error('Slots unavailable');
+    fp?.redraw?.();
+    renderSlotsForSelectedDate();
+    if (getSlotsForDate(ymd).length === 0) {
+      log('この日に予約できる時間はありません。別の日付を選んでください。');
+    }
+  } catch (e) {
+    if (isCurrent()) {
+      clearSlotsUI();
+      if (slotsAM) slotsAM.textContent = '取得できませんでした';
+      if (slotsPM) slotsPM.textContent = '日付選択へ戻って、もう一度お試しください';
+      log('空き時間を取得できませんでした。日付選択へ戻ってお試しください。');
+    }
+    console.error(e);
+  } finally { setCalendarLoading_(false); }
 }
 
 // ====== slots view ======
@@ -1431,22 +1434,16 @@ function renderReservationList(items) {
       }
 
       if (action === "rebook") {
-        const ymd2 = normalizeYmd(pickReservationYmd(it) || "");
-
-        setActiveTab("reserve");
-        ensureCalendarView();
-        log("空きを確認してるよ...");
-
-        setLoading(true, "空き枠を更新中...");
-        try {
-          const ym2 = toYmFromYmd(ymd2);
-          await refreshSlotsYm(ym2);
-          fp?.setDate(ymd2, true); // onChangeでslotsへ
-        } catch (e2) {
-          log(`ERROR: ${e2?.message || e2}`);
-        } finally {
-          setLoading(false);
+        const ymd2 = normalizeYmd(pickReservationYmd(it) || '');
+        setActiveTab('reserve');
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(ymd2) || ymd2 < todayYmdJst()) {
+          ensureCalendarView();
+          log('新しく予約する日付を選んでください。');
+          return;
         }
+        if (!fp) ensureCalendarView();
+        // Do not rely on flatpickr's change event: selecting today may be unchanged.
+        await openSlotsForDate_(ymd2, { force: true, syncCalendar: true });
       }
     });
 
