@@ -1,5 +1,17 @@
-// Startup measurement v20261028-07. Times start at browser navigation, not the LINE tap.
-const startupMeasure_ = { version: '20261028-07', jsStart: performance.now(), ms: {}, completed: false };
+// Measurement remains available for this page session; hidden by default.
+let showTimingPanels_ = false;
+function syncTimingPanels_() {
+  for (const id of ['startupTimingPanel', 'reservationTimingPanel']) {
+    document.getElementById(id)?.classList.toggle('hidden', !showTimingPanels_);
+  }
+}
+document.getElementById('toggleTimingPanels')?.addEventListener('change', event => {
+  showTimingPanels_ = !!event.target.checked;
+  syncTimingPanels_();
+});
+
+// Startup measurement v20261028-08. Times start at browser navigation, not the LINE tap.
+const startupMeasure_ = { version: '20261028-08', jsStart: performance.now(), ms: {}, completed: false };
 async function measureStartupPhase_(name, fn) {
   const start = performance.now();
   try { return await fn(); }
@@ -28,6 +40,7 @@ function finishStartupMeasurement_() {
       pre.textContent = `ページ読込開始→初月の空き情報準備完了:${sec(ms.navigationToReady)}\n画面コード開始まで:${sec(startupMeasure_.jsStart)}\nLIFF初期化:${sec(ms.liffInit)}\nプロフィール取得:${sec(ms.profile)}\n初月の空き枠取得:${sec(ms.initialSlots)}\n描画待ちの目安:${sec(ms.renderOpportunity)}\n※LINEでタップしてからページ読込開始までの時間は含みません。`;
       panel.append(summary, pre);
       document.getElementById('calendar')?.insertAdjacentElement('afterend', panel);
+      syncTimingPanels_();
       console.info('STARTUP_TIMING', { version: startupMeasure_.version, jsStart: startupMeasure_.jsStart, ms: { ...ms } });
     } catch (e) { console.warn('Startup measurement display unavailable'); }
   }));
@@ -1916,4 +1929,5 @@ function showReservationTiming_(ym, elapsed, server, outcome) {
     if (calendar) calendar.insertAdjacentElement('afterend', panel);
   }
   if (panel) panel.querySelector('pre').textContent = reservationTimingRows_.join('\n\n');
+  syncTimingPanels_();
 }
