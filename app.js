@@ -10,8 +10,8 @@ document.getElementById('toggleTimingPanels')?.addEventListener('change', event 
   syncTimingPanels_();
 });
 
-// Startup measurement v20261028-12. Times start at browser navigation, not the LINE tap.
-const startupMeasure_ = { version: '20261028-12', jsStart: performance.now(), ms: {}, completed: false };
+// Startup measurement v20261028-13. Times start at browser navigation, not the LINE tap.
+const startupMeasure_ = { version: '20261028-13', jsStart: performance.now(), ms: {}, completed: false };
 async function measureStartupPhase_(name, fn) {
   const start = performance.now();
   try { return await fn(); }
@@ -589,9 +589,20 @@ function slotIdToHm(slotId) {
 }
 
 function hmFromIso(iso) {
-  // "20260105T10:00:00+09:00" or "...Z" -> "10:00"
-  const m = String(iso || "").match(/T(\d{2}:\d{2})/);
-  return m ? m[1] : "";
+  let value = String(iso || '').trim();
+  if (!value) return '';
+  // Support the compact date format used by older slot records as well.
+  value = value.replace(/^(\d{4})(\d{2})(\d{2})T/, '$1-$2-$3T');
+  // If legacy data omits an offset, it represents the application's JST time.
+  if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?$/.test(value)) value += '+09:00';
+  const date = new Date(value);
+  if (isNaN(date.getTime())) return '';
+  const parts = new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'Asia/Tokyo', hour: '2-digit', minute: '2-digit', hourCycle: 'h23'
+  }).formatToParts(date);
+  const hour = parts.find(part => part.type === 'hour')?.value;
+  const minute = parts.find(part => part.type === 'minute')?.value;
+  return hour && minute ? `${hour}:${minute}` : '';
 }
 
 function isAM(slot) {
