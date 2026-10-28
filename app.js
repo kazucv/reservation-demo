@@ -10,8 +10,8 @@ document.getElementById('toggleTimingPanels')?.addEventListener('change', event 
   syncTimingPanels_();
 });
 
-// Startup measurement v20261028-13. Times start at browser navigation, not the LINE tap.
-const startupMeasure_ = { version: '20261028-13', jsStart: performance.now(), ms: {}, completed: false };
+// Startup measurement v20261028-14. Times start at browser navigation, not the LINE tap.
+const startupMeasure_ = { version: '20261028-14', jsStart: performance.now(), ms: {}, completed: false };
 async function measureStartupPhase_(name, fn) {
   const start = performance.now();
   try { return await fn(); }
@@ -1066,10 +1066,43 @@ function renderFormSummary() {
   `;
 }
 
-function normalizeTel(raw) {
-  // 数字と + だけ残す（日本は基本数字だけでOK）
-  return String(raw || "").replace(/[^\d+]/g, "");
+function normalizeTel(raw) { return normalizeReservationPhone_(raw); }
+
+function reservationInputError_(field, message) {
+  return { ok: false, code: 'input_invalid', field, message };
 }
+function normalizeReservationPhone_(raw) {
+  return String(raw || '').replace(/[０-９]/g, ch => String(ch.charCodeAt(0) - 0xFF10))
+    .replace(/＋/g, '+').replace(/[\s\u3000()（）\-‐‑‒–—―ー−－]/g, '')
+    .replace(/^\+81(?=[1-9]\d{8,9}$)/, '0');
+}
+function validateReservationInput_(body) {
+  if (!body || typeof body.name !== 'string' || typeof body.tel !== 'string' ||
+      (body.note !== undefined && body.note !== null && typeof body.note !== 'string')) {
+    return reservationInputError_('name', '入力内容を確認してください。');
+  }
+  const name = body.name.trim(), tel = normalizeReservationPhone_(body.tel), note = String(body.note || '').trim();
+  if (!name) return reservationInputError_('name', 'お名前を入力してください。');
+  if (name.length > 80) return reservationInputError_('name', 'お名前は80文字以内で入力してください。');
+  if (/[\u0000-\u001f\u007f]/.test(name)) return reservationInputError_('name', 'お名前に改行や制御文字は使用できません。');
+  if (!/^0\d{9,10}$/.test(tel)) return reservationInputError_('tel', '電話番号は0から始まる10〜11桁で入力してください。ハイフン・全角数字も使用できます。');
+  if (note.length > 500) return reservationInputError_('note', '備考は500文字以内で入力してください。');
+  if (/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(note)) return reservationInputError_('note', '備考に使用できない制御文字が含まれています。');
+  return { ok: true, name, tel, note };
+}
+
+function readReservationInput_() {
+  const result = validateReservationInput_({ name: nameInput.value, tel: telInput.value, note: noteInput.value });
+  if (!result.ok) {
+    log(result.message);
+    const target = { name: nameInput, tel: telInput, note: noteInput }[result.field];
+    target?.focus?.();
+  } else {
+    nameInput.value = result.name; telInput.value = result.tel; noteInput.value = result.note;
+  }
+  return result;
+}
+
 
 // Demo-only, opt-in test: drop one successful create response locally.
 let simulateLostReservationReply_ = false;
@@ -1161,13 +1194,9 @@ for (const id of ['checkReservationStatusBtn', 'checkReservationStatusSettingsBt
 async function reserveSelected() {
   if (!selectedSlot) return;
 
-  const name = String(nameInput.value || "").trim();
-  const tel = normalizeTel(telInput.value);
-
-  if (!name || !tel) {
-    log("お名前と電話番号は必須だよ");
-    return;
-  }
+  const input = readReservationInput_();
+  if (!input.ok) return;
+  const { name, tel, note } = input;
 
   log("予約中...");
 
@@ -1176,7 +1205,7 @@ async function reserveSelected() {
     slotId: selectedSlot.slotId,
     name,
     tel,
-    note: String(noteInput.value || "").trim(),
+    note,
   };
 
   const r = await submitReservationSafely_(payload);
@@ -1757,13 +1786,8 @@ async function run() {
         return;
       }
 
-      const name = String(nameInput.value || "").trim();
-      const tel = normalizeTel(telInput.value);
-
-      if (!name || !tel) {
-        log("お名前と電話番号は必須だよ");
-        return;
-      }
+      const input = readReservationInput_();
+      if (!input.ok) return;
 
       try {
         confirmSubmitBtn.disabled = true;
@@ -1790,13 +1814,8 @@ async function run() {
         return;
       }
 
-      const name = String(nameInput.value || "").trim();
-      const tel = normalizeTel(telInput.value);
-
-      if (!name || !tel) {
-        log("お名前と電話番号は必須だよ");
-        return;
-      }
+      const input = readReservationInput_();
+      if (!input.ok) return;
 
       renderConfirmSummary();
       showView("confirm");

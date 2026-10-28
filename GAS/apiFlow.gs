@@ -1,32 +1,65 @@
-function verifyLineAccessToken_(accessToken) {
-  const token = String(accessToken || "").trim();
-  if (!token) return { ok: false, message: "accessToken_required" };
+function validateLineTokenMetadata_(metadata, expectedChannel) {
+  if (!metadata || String(metadata.client_id || '') !== expectedChannel) {
+    return { ok: false, message: 'この予約アプリ用のログインではありません。デモ用リンクから開き直してください。' };
+  }
+  const seconds = Number(metadata.expires_in);
+  if (!Number.isFinite(seconds) || seconds <= 0) {
+    return { ok: false, message: 'ログインの有効期限が切れています。画面を開き直してください。' };
+  }
+  if (!String(metadata.scope || '').split(/\s+/).includes('profile')) {
+    return { ok: false, message: 'プロフィールの確認権限がありません。ログイン設定を確認してください。' };
+  }
+  return { ok: true, expiresIn: seconds };
+}
 
-  // 同じtokenで何回もLINEへ行かない（軽くキャッシュ）
+function verifyLineAccessToken_(accessToken) {
+  const token = String(accessToken || '').trim();
+  if (!token) return { ok: false, message: 'ログイン情報がありません。LINEから画面を開き直してください。' };
+  const expectedChannel = String(PropertiesService.getScriptProperties().getProperty('LINE_LOGIN_CHANNEL_ID') || '').trim();
+  if (!/^\d+$/.test(expectedChannel)) return { ok: false, message: 'LINEログインチャネルIDが未設定です。管理者にご連絡ください。' };
   const cache = CacheService.getScriptCache();
   const digest = Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, token);
-  const key = digest.map(b => ('0' + (b & 0xff).toString(16)).slice(-2)).join('').slice(0, 32);
-  const cacheKey = "lineuid:" + key;
-  const hit = cache.get(cacheKey);
-  if (hit) return { ok: true, userId: hit };
-
-  const url = "https://api.line.me/v2/profile";
-  const res = UrlFetchApp.fetch(url, {
-    method: "get",
-    headers: { Authorization: "Bearer " + token },
-    muteHttpExceptions: true,
-  });
-
-  if (res.getResponseCode() !== 200) {
-    return { ok: false, message: "line_token_invalid" };
+  const tokenHash = digest.map(b => ('0' + (b & 255).toString(16)).slice(-2)).join('');
+  // New namespace excludes the old profile-only cache; bind it to the expected channel.
+  const cacheKey = `lineauth:v2:${expectedChannel}:${tokenHash}`;
+  const raw = cache.get(cacheKey);
+  if (raw) {
+    let entry;
+    try { entry = JSON.parse(raw); } catch (e) { entry = null; }
+    const now = Date.now();
+    if (entry && entry.channelId === expectedChannel && typeof entry.userId === 'string' && entry.userId &&
+        Number.isFinite(entry.expiresAt) && entry.expiresAt > now &&
+        Number.isFinite(entry.validatedAt) && now >= entry.validatedAt && now - entry.validatedAt < 300000) {
+      return { ok: true, userId: entry.userId };
+    }
   }
-
-  const data = JSON.parse(res.getContentText() || "{}");
-  const uid = String(data.userId || "").trim();
-  if (!uid) return { ok: false, message: "line_userId_missing" };
-
-  cache.put(cacheKey, uid, 5 * 60);
-  return { ok: true, userId: uid };
+  try {
+    const startedAt = Date.now();
+    const verification = UrlFetchApp.fetch('https://api.line.me/oauth2/v2.1/verify?access_token=' + encodeURIComponent(token), {
+      method: 'get', muteHttpExceptions: true
+    });
+    const code = verification.getResponseCode();
+    if (code !== 200) return { ok: false, message: code >= 500 || code === 429 ? 'LINEの本人確認が一時的に利用できません。少し待って再度お試しください。' : 'ログイン情報を確認できません。画面を開き直してください。' };
+    const metadata = JSON.parse(verification.getContentText() || '{}');
+    const checked = validateLineTokenMetadata_(metadata, expectedChannel);
+    if (!checked.ok) return checked;
+    const expiresAt = startedAt + checked.expiresIn * 1000 - 5000;
+    if (expiresAt <= Date.now()) return { ok: false, message: 'ログインの有効期限が近づいています。画面を開き直してください。' };
+    const profile = UrlFetchApp.fetch('https://api.line.me/v2/profile', {
+      method: 'get', headers: { Authorization: 'Bearer ' + token }, muteHttpExceptions: true
+    });
+    if (profile.getResponseCode() !== 200) return { ok: false, message: 'LINEプロフィールを確認できません。画面を開き直してください。' };
+    const data = JSON.parse(profile.getContentText() || '{}');
+    const userId = String(data.userId || '').trim();
+    if (!userId || expiresAt <= Date.now()) return { ok: false, message: 'ログイン情報を確認できません。画面を開き直してください。' };
+    const validatedAt = Date.now();
+    const ttl = Math.min(300, Math.floor((expiresAt - validatedAt) / 1000));
+    if (ttl > 0) cache.put(cacheKey, JSON.stringify({ userId, channelId: expectedChannel, validatedAt, expiresAt }), ttl);
+    return { ok: true, userId };
+  } catch (e) {
+    // Never log exception text: request URLs can contain access tokens.
+    return { ok: false, message: 'LINEの本人確認ができませんでした。通信状態を確認して再度お試しください。' };
+  }
 }
 
 function withCacheJson_(key, ttlSec, fn) {
@@ -523,6 +556,9 @@ function handleRestoreReservation_(body) {
       return { ok: false, message: "status_not_cancelled" };
     }
 
+    const input = validateReservationInput_({ name, tel: tel.replace(/^'/, ''), note });
+    if (!input.ok) return input;
+    name = input.name; tel = input.tel; note = input.note;
     const ymd = toYmd_(dateStr);
     const parsed = parseSlotId_(`${ymd.replaceAll('-', '')}_${timeRange}`);
     if (!parsed.ok) return parsed;
@@ -594,9 +630,10 @@ function handleRestoreReservation_(body) {
 function handleCreateReservation_(body) {
   debugLog('🟢 handleCreateReservation', { slotId: body.slotId });
   const userId = String(body.userId || "").trim();
-  const name = String(body.name || "").trim();
-  const tel = String(body.tel || "").trim();
-  const note = String(body.note || "").trim();
+  const input = validateReservationInput_(body);
+  if (!input.ok) return input;
+  const { name, tel, note } = input;
+  body = Object.assign({}, body, { name, tel, note });
   const slotId = String(body.slotId || "").trim();
 
   if (!userId) return { ok: false, message: "userId_required" };
@@ -668,13 +705,13 @@ function handleCreateReservation_(body) {
     }
 
     try {
-      sheet.appendRow([
+      appendReservationTextRow_(sheet, [
         reservationId,
         userId,
         dateStr,         // "yyyy/MM/dd"
         timeLabel,       // "HH:mm〜HH:mm"
         name,
-        "'" + tel,
+        tel,
         note,
         new Date(),
         STATUS_RESERVED,
@@ -1061,4 +1098,39 @@ function handleReservationRequestStatus_(body) {
     return { ok: true, state: 'reserved', reservation: reservationOperationResult_(row) };
   } catch (e) { return { ok: false, message: 'status_unavailable' }; }
   finally { lock.releaseLock(); }
+}
+
+function reservationInputError_(field, message) {
+  return { ok: false, code: 'input_invalid', field, message };
+}
+function normalizeReservationPhone_(raw) {
+  return String(raw || '').replace(/[０-９]/g, ch => String(ch.charCodeAt(0) - 0xFF10))
+    .replace(/＋/g, '+').replace(/[\s\u3000()（）\-‐‑‒–—―ー−－]/g, '')
+    .replace(/^\+81(?=[1-9]\d{8,9}$)/, '0');
+}
+function validateReservationInput_(body) {
+  if (!body || typeof body.name !== 'string' || typeof body.tel !== 'string' ||
+      (body.note !== undefined && body.note !== null && typeof body.note !== 'string')) {
+    return reservationInputError_('name', '入力内容を確認してください。');
+  }
+  const name = body.name.trim(), tel = normalizeReservationPhone_(body.tel), note = String(body.note || '').trim();
+  if (!name) return reservationInputError_('name', 'お名前を入力してください。');
+  if (name.length > 80) return reservationInputError_('name', 'お名前は80文字以内で入力してください。');
+  if (/[\u0000-\u001f\u007f]/.test(name)) return reservationInputError_('name', 'お名前に改行や制御文字は使用できません。');
+  if (!/^0\d{9,10}$/.test(tel)) return reservationInputError_('tel', '電話番号は0から始まる10〜11桁で入力してください。ハイフン・全角数字も使用できます。');
+  if (note.length > 500) return reservationInputError_('note', '備考は500文字以内で入力してください。');
+  if (/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(note)) return reservationInputError_('note', '備考に使用できない制御文字が含まれています。');
+  return { ok: true, name, tel, note };
+}
+
+// All reservation columns are strings. RichTextValue writes literal text, not formulas.
+// The caller already holds the reservation script lock.
+function appendReservationTextRow_(sheet, values) {
+  const rich = values.map(value => {
+    const text = value instanceof Date
+      ? Utilities.formatDate(value, 'Asia/Tokyo', 'yyyy/MM/dd HH:mm:ss')
+      : String(value === null || value === undefined ? '' : value);
+    return SpreadsheetApp.newRichTextValue().setText(text).build();
+  });
+  sheet.getRange(sheet.getLastRow() + 1, 1, 1, rich.length).setRichTextValues([rich]);
 }

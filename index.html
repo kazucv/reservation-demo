@@ -924,14 +924,14 @@
 
           <div class="label">お試し用の情報</div>
           <div class="hint">体験デモです。実際の来店予約は行われません。氏名・電話番号・備考には、実際の個人情報を入力しないでください。</div>
-          <input id="name" placeholder="例：デモテスト" autocomplete="off" />
-          <input id="tel" placeholder="例：09000000000" inputmode="numeric" autocomplete="off" />
+          <input id="name" maxlength="80" placeholder="例：デモテスト" autocomplete="off" />
+          <input id="tel" maxlength="40" placeholder="例：09000000000" inputmode="numeric" autocomplete="off" />
 
           <div class="label">メモ</div>
-          <textarea id="note" placeholder="例：動作確認（任意）"></textarea>
+          <textarea id="note" maxlength="500" placeholder="例：動作確認（任意）"></textarea>
 
           <button id="confirmBtn" class="primary">内容を確認する</button>
-          <div class="hint">お名前と電話番号は必須です</div>
+          <div class="hint">お名前は80文字以内、電話番号は0から始まる10〜11桁、備考は500文字以内で入力してください。</div>
         </section>
 
         <section id="viewConfirm" class="view hidden">
@@ -1095,6 +1095,6 @@
       </div>
     </div>
 
-    <script src="./app.js?v=20261028-13"></script>
+    <script src="./app.js?v=20261028-14"></script>
   </body>
 </html>
