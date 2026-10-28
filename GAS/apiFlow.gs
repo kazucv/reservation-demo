@@ -352,6 +352,8 @@ function measuredApiOriginal_(body) {
   switch (body.action) {
     case "getSlots":
       return handleGetSlots_(body);
+    case "reservationRequestStatus":
+      return handleReservationRequestStatus_(body);
     case "createReservation":
       return handleCreateReservation_(body);
     case "myReservations":
@@ -602,6 +604,9 @@ function handleCreateReservation_(body) {
   if (!name) return { ok: false, message: "name_required" };
   if (!tel) return { ok: false, message: "tel_required" };
 
+  const requestId = String(body.requestId || '').trim();
+  if (!/^[A-Za-z0-9_-]{16,80}$/.test(requestId)) return { ok: false, code: 'request_id_required', message: '画面を開き直してから予約してください。' };
+
   // slotId -> start/end
   const parsed = parseSlotId_(slotId);
   if (!parsed.ok) return parsed;
@@ -616,6 +621,10 @@ function handleCreateReservation_(body) {
   const lock = LockService.getScriptLock();
   try {
     lock.waitLock(10000); // 10秒まで待つ
+
+    const operationSheet = getOperationSheet_();
+    const previous = findReservationOperation_(operationSheet, userId, requestId);
+    if (previous) return operationReplay_(previous, body);
 
     const ruleCheck = validateReservationRules_(parsed, userId);
     if (!ruleCheck.ok) return ruleCheck;
@@ -669,7 +678,8 @@ function handleCreateReservation_(body) {
         note,
         new Date(),
         STATUS_RESERVED,
-        event.getId(), // ← 追加
+        event.getId(), // Calendar event ID
+        requestId, // K: durable operation ID
       ]);
     } catch (e) {
       // 書き込み失敗 → イベントも消して整合性を保つ（厳密）
@@ -1006,4 +1016,49 @@ function getVerifiedReservationBusy_(start, end) {
     }
   }
   return busy;
+}
+
+// K is deliberately checked rather than silently overwriting an existing column.
+function getOperationSheet_() {
+  const sheet = SpreadsheetApp.openById(SHEET_ID).getSheetByName(SHEET_NAME);
+  if (!sheet || String(sheet.getRange(1, 11).getValue()).trim() !== '操作ID') {
+    throw new Error('K列の見出しに「操作ID」を設定してください。');
+  }
+  return sheet;
+}
+function findReservationOperation_(sheet, userId, requestId) {
+  const last = sheet.getLastRow();
+  if (last < 2) return null;
+  const rows = sheet.getRange(2, 1, last - 1, 11).getValues();
+  return rows.find(row => String(row[COL.USER_ID] || '') === userId && String(row[10] || '') === requestId) || null;
+}
+function reservationOperationResult_(row) {
+  const ymd = toYmd_(row[COL.DATE]);
+  const parsed = parseSlotId_(`${ymd.replaceAll('-', '')}_${row[COL.TIME]}`);
+  if (!parsed.ok) throw new Error('Stored reservation date is invalid');
+  return { ok: true, reservationId: String(row[COL.RESERVATION_ID]), slotId: `${ymd.replaceAll('-', '')}_${row[COL.TIME]}`,
+    start: parsed.start.toISOString(), end: parsed.end.toISOString(), eventId: String(row[COL.EVENT_ID] || ''), recovered: true };
+}
+function operationReplay_(row, body) {
+  if (String(row[COL.STATUS]) !== STATUS_RESERVED) return { ok: false, code: 'operation_closed', message: 'この操作の予約はキャンセル済みです。新しく予約してください。' };
+  const result = reservationOperationResult_(row);
+  const same = result.slotId === String(body.slotId || '').trim() &&
+    String(row[COL.NAME] || '') === String(body.name || '').trim() &&
+    String(row[COL.TEL] || '').replace(/^'/, '') === String(body.tel || '').trim() &&
+    String(row[COL.NOTE] || '') === String(body.note || '').trim();
+  if (!same) return { ok: false, code: 'request_content_changed', message: '前の予約操作の結果を確認してください。' };
+  return result;
+}
+function handleReservationRequestStatus_(body) {
+  const userId = String(body.userId || '').trim(), requestId = String(body.requestId || '').trim();
+  if (!userId || !/^[A-Za-z0-9_-]{16,80}$/.test(requestId)) return { ok: false, message: 'request_invalid' };
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(1000)) return { ok: true, state: 'processing' };
+  try {
+    const row = findReservationOperation_(getOperationSheet_(), userId, requestId);
+    if (!row) return { ok: true, state: 'not_found' };
+    if (String(row[COL.STATUS]) !== STATUS_RESERVED) return { ok: true, state: 'closed' };
+    return { ok: true, state: 'reserved', reservation: reservationOperationResult_(row) };
+  } catch (e) { return { ok: false, message: 'status_unavailable' }; }
+  finally { lock.releaseLock(); }
 }

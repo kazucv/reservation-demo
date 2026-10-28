@@ -10,8 +10,8 @@ document.getElementById('toggleTimingPanels')?.addEventListener('change', event 
   syncTimingPanels_();
 });
 
-// Startup measurement v20261028-10. Times start at browser navigation, not the LINE tap.
-const startupMeasure_ = { version: '20261028-10', jsStart: performance.now(), ms: {}, completed: false };
+// Startup measurement v20261028-11. Times start at browser navigation, not the LINE tap.
+const startupMeasure_ = { version: '20261028-11', jsStart: performance.now(), ms: {}, completed: false };
 async function measureStartupPhase_(name, fn) {
   const start = performance.now();
   try { return await fn(); }
@@ -510,7 +510,7 @@ function showView(name) {
 function showDone(reserveResult) {
   const rid = reserveResult?.reservationId || "(不明)";
 
-  const slot = selectedSlot;
+  const slot = reserveResult?.start ? reserveResult : selectedSlot;
   const startHm = slot
     ? hmFromIso(slot.start) || slotIdToStartHm(slot.slotId)
     : "";
@@ -522,9 +522,9 @@ function showDone(reserveResult) {
   }
 
   doneSummary.innerHTML = `
-    <div style="font-weight:700; font-size:18px;">予約できたよ ✅</div>
+    <div style="font-weight:700; font-size:18px;">${reserveResult?.recovered ? "成立済みの予約を確認しました ✅" : "予約できたよ ✅"}</div>
     <div style="margin-top:8px;" class="sub">予約ID: ${rid}</div>
-    <div style="margin-top:8px;" class="sub">日付: ${selectedDate || ""}</div>
+    <div style="margin-top:8px;" class="sub">日付: ${escapeHtml(reserveResult?.start ? slotIdToYmd(reserveResult.slotId) : (selectedDate || ""))}</div>
     <div style="margin-top:4px;" class="sub">時間: ${startHm} 〜 ${endHm}</div>
   `;
 
@@ -1060,6 +1060,75 @@ function normalizeTel(raw) {
   return String(raw || "").replace(/[^\d+]/g, "");
 }
 
+let pendingOperationMemory_ = null;
+function operationStorageKey_() { return 'reservationPending:v1:' + (profile?.userId || ''); }
+function loadPendingOperation_() {
+  try { return JSON.parse(sessionStorage.getItem(operationStorageKey_()) || 'null') || pendingOperationMemory_; }
+  catch (e) { return pendingOperationMemory_; }
+}
+function savePendingOperation_(operation) {
+  pendingOperationMemory_ = operation;
+  try {
+    if (operation) sessionStorage.setItem(operationStorageKey_(), JSON.stringify(operation));
+    else sessionStorage.removeItem(operationStorageKey_());
+  } catch (e) { /* Memory fallback for browsers without session storage. */ }
+}
+async function checkPendingOperation_(operation) {
+  return await postJson(GAS_URL, { action: 'reservationRequestStatus', requestId: operation.id }, 10000);
+}
+async function submitReservationSafely_(payload) {
+  let operation = loadPendingOperation_();
+  if (!operation) {
+    if (!window.crypto?.randomUUID) throw new Error('このブラウザでは予約操作IDを作れません。LINEを更新してお試しください。');
+    operation = { id: window.crypto.randomUUID(), createdAt: Date.now() };
+    savePendingOperation_(operation);
+  }
+  let response;
+  try { response = await postJson(GAS_URL, { ...payload, requestId: operation.id }, 10000); }
+  catch (e) { response = null; }
+  const uncertain = !response?.data || ['lock_or_internal_error', 'server_error'].includes(response.data.message) || response.data.code === 'request_content_changed';
+  if (uncertain) {
+    log('通信結果を確認しています。予約を重ねて送信せず、このままお待ちください。');
+    try {
+      const status = await checkPendingOperation_(operation);
+      if (status.data?.ok && status.data.state === 'reserved') {
+        savePendingOperation_(null);
+        return { data: status.data.reservation };
+      }
+      if (status.data?.ok && status.data.state === 'closed') {
+        savePendingOperation_(null);
+        return { data: { ok: false, message: 'この操作の予約はキャンセル済みです。新しく予約してください。' } };
+      }
+    } catch (e) { /* Keep operation ID for a safe retry. */ }
+    return { data: { ok: false, message: '予約の成立をまだ確認できません。同じ画面で再度確定するか、「予約の成立状況を確認」を押してください。' } };
+  }
+  // A definitive response (success or rejection before writing) finishes this operation.
+  savePendingOperation_(null);
+  return response;
+}
+async function inspectPendingReservation_() {
+  if (!profile?.userId) { log('ログイン情報を取得してからお試しください。'); return; }
+  const operation = loadPendingOperation_();
+  if (!operation) { log('確認待ちの操作はありません。予約一覧で予約内容をご確認ください。'); return; }
+  setLoading(true, '予約の成立状況を確認中…');
+  try {
+    const result = await checkPendingOperation_(operation);
+    if (result.data?.ok && result.data.state === 'reserved') {
+      savePendingOperation_(null);
+      showDone(result.data.reservation);
+    } else if (result.data?.ok && result.data.state === 'closed') {
+      savePendingOperation_(null);
+      log('この操作の予約はキャンセル済みです。予約一覧をご確認ください。');
+    } else {
+      log('まだ成立を確認できません。処理中の場合もあるため、少し待って再確認してください。');
+    }
+  } catch (e) { log('確認できませんでした。通信が戻ってから再確認してください。'); }
+  finally { setLoading(false); }
+}
+for (const id of ['checkReservationStatusBtn', 'checkReservationStatusSettingsBtn']) {
+  document.getElementById(id)?.addEventListener('click', inspectPendingReservation_);
+}
+
 // ====== reserve ======
 async function reserveSelected() {
   if (!selectedSlot) return;
@@ -1082,7 +1151,7 @@ async function reserveSelected() {
     note: String(noteInput.value || "").trim(),
   };
 
-  const r = await postJson(GAS_URL, payload, 10000);
+  const r = await submitReservationSafely_(payload);
 
   // ✅ 失敗
   if (!r.data?.ok) {
