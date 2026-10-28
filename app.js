@@ -10,8 +10,8 @@ document.getElementById('toggleTimingPanels')?.addEventListener('change', event 
   syncTimingPanels_();
 });
 
-// Startup measurement v20261028-11. Times start at browser navigation, not the LINE tap.
-const startupMeasure_ = { version: '20261028-11', jsStart: performance.now(), ms: {}, completed: false };
+// Startup measurement v20261028-12. Times start at browser navigation, not the LINE tap.
+const startupMeasure_ = { version: '20261028-12', jsStart: performance.now(), ms: {}, completed: false };
 async function measureStartupPhase_(name, fn) {
   const start = performance.now();
   try { return await fn(); }
@@ -1060,6 +1060,19 @@ function normalizeTel(raw) {
   return String(raw || "").replace(/[^\d+]/g, "");
 }
 
+// Demo-only, opt-in test: drop one successful create response locally.
+let simulateLostReservationReply_ = false;
+const simulateLostReplyCheckbox_ = document.getElementById('simulateLostReservationReply');
+simulateLostReplyCheckbox_?.addEventListener('change', event => {
+  simulateLostReservationReply_ = !!event.target.checked && LIFF_ID === '2012251349-h5PBdLoh';
+});
+function consumeLostReplySimulation_() {
+  if (!simulateLostReservationReply_ || LIFF_ID !== '2012251349-h5PBdLoh') return false;
+  simulateLostReservationReply_ = false;
+  if (simulateLostReplyCheckbox_) simulateLostReplyCheckbox_.checked = false;
+  return true;
+}
+
 let pendingOperationMemory_ = null;
 function operationStorageKey_() { return 'reservationPending:v1:' + (profile?.userId || ''); }
 function loadPendingOperation_() {
@@ -1086,6 +1099,10 @@ async function submitReservationSafely_(payload) {
   let response;
   try { response = await postJson(GAS_URL, { ...payload, requestId: operation.id }, 10000); }
   catch (e) { response = null; }
+  if (response?.data?.ok && consumeLostReplySimulation_()) {
+    response = null;
+    log('検証用に成功応答を未受信として扱い、保存済みの予約を確認します。');
+  }
   const uncertain = !response?.data || ['lock_or_internal_error', 'server_error'].includes(response.data.message) || response.data.code === 'request_content_changed';
   if (uncertain) {
     log('通信結果を確認しています。予約を重ねて送信せず、このままお待ちください。');

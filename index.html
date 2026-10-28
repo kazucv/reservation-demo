@@ -1042,6 +1042,11 @@
                 <span>予約画面に計測結果を表示する</span>
               </label>
               <p class="hint">通常はオフでご利用ください。画面を開き直すとオフに戻ります。</p>
+              <label class="timing-toggle">
+                <input id="simulateLostReservationReply" type="checkbox" autocomplete="off" />
+                <span>次の予約で、成功応答を受け取れない状態をテストする</span>
+              </label>
+              <p class="hint">デモ検証専用です。予約は実際に登録されます。成功応答を1回だけ未受信として扱い、成立状況を自動確認します。回線は切断しません。</p>
             </details>
           </div>
         </section>
@@ -1090,6 +1095,6 @@
       </div>
     </div>
 
-    <script src="./app.js?v=20261028-11"></script>
+    <script src="./app.js?v=20261028-12"></script>
   </body>
 </html>
