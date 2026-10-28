@@ -10,8 +10,8 @@ document.getElementById('toggleTimingPanels')?.addEventListener('change', event 
   syncTimingPanels_();
 });
 
-// Startup measurement v20261028-09. Times start at browser navigation, not the LINE tap.
-const startupMeasure_ = { version: '20261028-09', jsStart: performance.now(), ms: {}, completed: false };
+// Startup measurement v20261028-10. Times start at browser navigation, not the LINE tap.
+const startupMeasure_ = { version: '20261028-10', jsStart: performance.now(), ms: {}, completed: false };
 async function measureStartupPhase_(name, fn) {
   const start = performance.now();
   try { return await fn(); }
@@ -1320,22 +1320,21 @@ function renderReservationList(items) {
       ? "⚪️ 完了"
       : `⚪️ ${s || "不明"}`;
 
-    // ボタン：過去は出さない（運用として安全）
+    // Canceled records start a new booking; elapsed original time must not hide it.
     let actionButtons = "";
-    if (!isPast) {
-      if (isCanceled) {
-        actionButtons = `
-          <button type="button" class="ghost-btn" data-action="rebook">
-            もう一度予約する
-          </button>
-        `;
-      } else {
-        actionButtons = `
-          <button type="button" class="danger-btn" data-action="cancel">
-            キャンセル
-          </button>
-        `;
-      }
+    if (isCanceled) {
+      const rebookLabel = ymdNorm >= todayYmdJst() ? 'この日で新しく予約' : '新しく予約';
+      actionButtons = `
+        <button type="button" class="ghost-btn" data-action="rebook">
+          ${rebookLabel}
+        </button>
+      `;
+    } else if (!isPast && !isDone) {
+      actionButtons = `
+        <button type="button" class="danger-btn" data-action="cancel">
+          キャンセル
+        </button>
+      `;
     }
 
     const card = document.createElement("div");
