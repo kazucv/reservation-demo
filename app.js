@@ -1,3 +1,4 @@
+let verificationMode_ = false;
 // Measurement remains available for this page session; hidden by default.
 let showTimingPanels_ = false;
 function syncTimingPanels_() {
@@ -6,12 +7,12 @@ function syncTimingPanels_() {
   }
 }
 document.getElementById('toggleTimingPanels')?.addEventListener('change', event => {
-  showTimingPanels_ = !!event.target.checked;
+  showTimingPanels_ = verificationMode_ && !!event.target.checked;
   syncTimingPanels_();
 });
 
-// Startup measurement v20261028-18. Times start at browser navigation, not the LINE tap.
-const startupMeasure_ = { version: '20261028-18', jsStart: performance.now(), ms: {}, completed: false };
+// Startup measurement v20261028-19. Times start at browser navigation, not the LINE tap.
+const startupMeasure_ = { version: '20261028-19', jsStart: performance.now(), ms: {}, completed: false };
 async function measureStartupPhase_(name, fn) {
   const start = performance.now();
   try { return await fn(); }
@@ -1146,7 +1147,7 @@ for (const [field, input] of Object.entries(reservationFieldElements_())) {
 let simulateLostReservationReply_ = false;
 const simulateLostReplyCheckbox_ = document.getElementById('simulateLostReservationReply');
 simulateLostReplyCheckbox_?.addEventListener('change', event => {
-  simulateLostReservationReply_ = !!event.target.checked && LIFF_ID === '2012251349-h5PBdLoh';
+  simulateLostReservationReply_ = verificationMode_ && !!event.target.checked && LIFF_ID === '2012251349-h5PBdLoh';
 });
 function consumeLostReplySimulation_() {
   if (!simulateLostReservationReply_ || LIFF_ID !== '2012251349-h5PBdLoh') return false;
@@ -1156,6 +1157,12 @@ function consumeLostReplySimulation_() {
 }
 
 let pendingOperationMemory_ = null;
+let recoveryCheckVisible_ = false;
+function syncRecoveryButtons_() {
+  for (const id of ['checkReservationStatusBtn', 'checkReservationStatusSettingsBtn']) {
+    document.getElementById(id)?.classList.toggle('hidden', !recoveryCheckVisible_);
+  }
+}
 function operationStorageKey_() { return 'reservationPending:v1:' + (profile?.userId || ''); }
 function loadPendingOperation_() {
   try { return JSON.parse(sessionStorage.getItem(operationStorageKey_()) || 'null') || pendingOperationMemory_; }
@@ -1163,6 +1170,7 @@ function loadPendingOperation_() {
 }
 function savePendingOperation_(operation) {
   pendingOperationMemory_ = operation;
+  if (!operation) { recoveryCheckVisible_ = false; syncRecoveryButtons_(); }
   try {
     if (operation) sessionStorage.setItem(operationStorageKey_(), JSON.stringify(operation));
     else sessionStorage.removeItem(operationStorageKey_());
@@ -1187,6 +1195,8 @@ async function submitReservationSafely_(payload) {
   }
   const uncertain = !response?.data || ['lock_or_internal_error', 'server_error'].includes(response.data.message) || response.data.code === 'request_content_changed';
   if (uncertain) {
+    recoveryCheckVisible_ = true;
+    syncRecoveryButtons_();
     log('通信結果を確認しています。予約を重ねて送信せず、このままお待ちください。');
     try {
       const status = await checkPendingOperation_(operation);
@@ -1908,6 +1918,10 @@ async function run() {
 
   // Start
   const params = new URLSearchParams(location.search);
+  verificationMode_ = params.get('verify') === '1' && LIFF_ID === '2012251349-h5PBdLoh';
+  document.getElementById('demoVerificationSettings')?.classList.toggle('hidden', !verificationMode_);
+  recoveryCheckVisible_ = !!loadPendingOperation_();
+  syncRecoveryButtons_();
   const tab = params.get("tab") || "reserve";
 
   if (tab === "list") {

@@ -955,7 +955,7 @@
 
           <button id="confirmSubmitBtn" class="primary">この内容で予約する</button>
           <div class="hint">デモ用の予約データを登録します。実際の来店予約は行われません。</div>
-          <button id="checkReservationStatusBtn" type="button" class="ghost">予約の成立状況を確認</button>
+          <button id="checkReservationStatusBtn" type="button" class="ghost hidden">予約の成立状況を確認</button>
         </section>
 
         <section id="viewDone" class="view hidden">
@@ -1002,7 +1002,7 @@
 
         <section id="viewSettings" class="hidden">
           <div class="title">ご案内</div>
-          <button id="checkReservationStatusSettingsBtn" type="button" class="ghost">予約の成立状況を確認</button>
+          <button id="checkReservationStatusSettingsBtn" type="button" class="ghost hidden">予約の成立状況を確認</button>
           <div class="card">
             <div class="item">
               <h3 class="setting__title">このデモについて</h3>
@@ -1041,7 +1041,7 @@
               <h3 class="setting__title">表示が更新されない場合</h3>
               <p>画面を下に引っ張って更新してください。通信エラーが出た場合は、再操作の前に「予約一覧」で登録状況を確認してください。</p>
             </div>
-            <details class="demo-verification">
+            <details id="demoVerificationSettings" class="demo-verification hidden">
               <summary>動作確認用の設定</summary>
               <label class="timing-toggle">
                 <input id="toggleTimingPanels" type="checkbox" autocomplete="off" />
@@ -1101,6 +1101,6 @@
       </div>
     </div>
 
-    <script src="./app.js?v=20261028-18"></script>
+    <script src="./app.js?v=20261028-19"></script>
   </body>
 </html>
