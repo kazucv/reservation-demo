@@ -1,0 +1,1135 @@
+// ==========================
+// 📌 デバッグログ出力
+// ==========================
+function debugLog(type, message) {
+  if (!IS_DEBUG) return;
+
+  try {
+    const ss = SpreadsheetApp.openById(LOG_SHEET_ID);
+    const sheet = ss.getSheetByName(LOG_SHEET_NAME);
+
+    if (!sheet) {
+      Logger.log(`❌ LOG_SHEET_NAME not found: ${LOG_SHEET_NAME}`);
+      return;
+    }
+
+    sheet.appendRow([
+      new Date(),
+      type,
+      typeof message === 'string'
+        ? message
+        : JSON.stringify(message)
+    ]);
+
+  } catch (e) {
+    Logger.log(`❌ debugLog error: ${e.toString()}`);
+  }
+}
+
+function test_weekDebug() {
+  const start = new Date(2026, 0, 4); // 1/4（日）
+  const weekDates = [];
+
+  for (let i = 0; i < 7; i++) {
+    const d = new Date(start);
+    d.setDate(start.getDate() + i);
+    weekDates.push(d);
+  }
+
+  getTimeSlotCacheForWeek(weekDates);
+}
+
+
+// ==========================
+// ✅ B: 予約可否の最終判定（統合）
+// ==========================
+
+function getReservationCtx_(override = {}) {
+  const cache = CacheService.getScriptCache();
+
+  const wk = override.weekdayRules ? JSON.stringify(override.weekdayRules) : '';
+  const md = (override.minDaysAhead !== undefined) ? String(override.minDaysAhead) : '';
+  const key = `reserve_ctx_v1_${wk}_${md}`;
+
+  const hit = cache.get(key);
+  if (hit) return JSON.parse(hit);
+
+  const holidays = getAllHolidaysWithOverrides();
+  const excludedRaw = getExcludedDates();
+
+  const holidaySet = new Set(holidays);
+  const excludedSet = new Set();
+  const overrideSet = new Set();
+
+  for (const ex of excludedRaw) {
+    if (!ex) continue;
+    if (typeof ex === 'string') excludedSet.add(ex);
+    else if (typeof ex === 'object' && ex.iso) {
+      if (ex.override) overrideSet.add(ex.iso);
+      else excludedSet.add(ex.iso);
+    }
+  }
+
+  const ctx = {
+    holidaySet: [...holidaySet],
+    excludedSet: [...excludedSet],
+    overrideSet: [...overrideSet],
+    weekdayRules: override.weekdayRules || WEEKDAY_RULES || {},
+    minDaysAhead: Number(
+      (override.minDaysAhead !== undefined) ? override.minDaysAhead : (MIN_DAYS_AHEAD || 0)
+    ),
+  };
+
+  cache.put(key, JSON.stringify(ctx), 10 * 60);
+  return ctx;
+}
+
+// dateObj が予約可能か（祝日/除外/曜日/最短日数）
+function isReservableDay_(dateObj, ctx) {
+  const d = new Date(dateObj);
+  d.setHours(0, 0, 0, 0);
+
+  const iso = Utilities.formatDate(d, 'Asia/Tokyo', 'yyyy-MM-dd');
+  const weekday = d.getDay();
+
+  // ctxは省略可（省略なら内部で取る）
+  ctx = ctx || getReservationCtx_();
+
+  const holidaySet = new Set(ctx.holidaySet || []);
+  const excludedSet = new Set(ctx.excludedSet || []);
+  const overrideSet = new Set(ctx.overrideSet || []);
+
+  // minDaysAhead
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const min = new Date(today);
+  min.setDate(min.getDate() + Number(ctx.minDaysAhead || 0));
+  if (d.getTime() < min.getTime()) return false;
+
+  // 曜日ルール（noneなら休業）
+  const rule = (ctx.weekdayRules || {})[weekday] || 'ok';
+  if (rule === 'none') return false;
+
+  // 営業除外（休業）
+  if (excludedSet.has(iso)) return false;
+
+  // 祝日（ただし override なら営業）
+  if (holidaySet.has(iso) && !overrideSet.has(iso)) return false;
+
+  return true;
+}
+
+// 曜日ルールから、その日の時間帯配列を返す（am/pm/両方/none）
+function getTimeRangesForDate_(dateObj, ctx) {
+  const d = new Date(dateObj);
+  d.setHours(0, 0, 0, 0);
+  ctx = ctx || getReservationCtx_();
+
+  const weekday = d.getDay();
+  const rule = (ctx.weekdayRules || {})[weekday] || 'ok';
+
+  if (rule === 'none') return [];
+  if (rule === 'am') return [].concat(TIME_SLOTS_AM || []);
+  if (rule === 'pm') return [].concat(TIME_SLOTS_PM || []);
+  // ok / both / その他は両方
+  return [].concat(TIME_SLOTS_AM || [], TIME_SLOTS_PM || []);
+}
+
+
+/**
+ * busy 取得（メイン＋追加カレンダー）
+ * - range を idsKey + start/end でキャッシュ
+ * - opts.force でキャッシュ無視
+ * 戻り値: [{ start:Date, end:Date, calendarId:string, eventId?:string }]
+ */
+function getBusySlots(start, end, opts) {
+  opts = opts || {};
+  const force = !!opts.force;
+
+  const s = new Date(start);
+  const e = new Date(end);
+  if (!(s instanceof Date) || isNaN(s.getTime())) return [];
+  if (!(e instanceof Date) || isNaN(e.getTime())) return [];
+  if (e <= s) return [];
+
+  // idsKey は「どのカレンダーを見ているか」の署名
+  const idsKey = getIdsKey_();
+
+  // キャッシュキー（範囲を分単位に丸めてキーを安定化）
+  const key =
+    `busy:${idsKey}:` +
+    `${Utilities.formatDate(s, TZ, "yyyyMMddHHmm")}-` +
+    `${Utilities.formatDate(e, TZ, "yyyyMMddHHmm")}`;
+
+  const cache = CacheService.getScriptCache();
+  if (!force) {
+    const hit = cache.get(key);
+    if (hit) return JSON.parse(hit).map(x => ({
+      start: new Date(x.start),
+      end: new Date(x.end),
+      calendarId: x.calendarId,
+      eventId: x.eventId || ""
+    }));
+  }
+
+  const ids = [CALENDAR_ID].concat(ADDITIONAL_CALENDAR_IDS || []);
+  const busy = [];
+
+  for (const id of ids) {
+    const cal = CalendarApp.getCalendarById(id);
+    if (!cal) continue;
+
+    // ★境界ズレ吸収（ここもstart2/end2思想で）
+    const s2 = new Date(s.getTime() + 1);
+    const e2 = new Date(e.getTime() - 1);
+
+    const evs = cal.getEvents(s2, e2);
+    for (const ev of evs) {
+      busy.push({
+        start: ev.getStartTime(),
+        end: ev.getEndTime(),
+        calendarId: id,
+        eventId: ev.getId()
+      });
+    }
+  }
+
+  // 15分キャッシュ（slots月キャッシュと同じ温度感）
+  cache.put(
+    key,
+    JSON.stringify(busy.map(x => ({
+      start: x.start.toISOString(),
+      end: x.end.toISOString(),
+      calendarId: x.calendarId,
+      eventId: x.eventId || ""
+    }))),
+    15 * 60
+  );
+
+  return busy;
+}
+
+/**
+ * キャッシュキー（長くなりすぎないようにhash化）
+ */
+function buildFreebusyCacheKey_(start, end, calIds) {
+  const base = [
+    "freebusy",
+    start.toISOString(),
+    end.toISOString(),
+    calIds.join(",")
+  ].join("|");
+
+  // MD5で短くする（Cache key 250文字制限対策）
+  const digest = Utilities.computeDigest(Utilities.DigestAlgorithm.MD5, base, Utilities.Charset.UTF_8);
+  const hex = digest.map(b => ("0" + (b & 0xff).toString(16)).slice(-2)).join("");
+
+  return "fb_" + hex;
+}
+
+/**
+ * 予約判定を速くするため、busy範囲を結合して数を減らす
+ * - 重複
+ * - 連続（end==next.start）
+ * - 1分以内の隙間（誤差吸収）
+ */
+function mergeRanges_(ranges) {
+  const list = (ranges || [])
+    .filter(r => r && r.start instanceof Date && r.end instanceof Date && r.start < r.end)
+    .sort((a, b) => a.start - b.start);
+
+  if (list.length <= 1) return list;
+
+  const merged = [];
+  let cur = { start: list[0].start, end: list[0].end };
+
+  for (let i = 1; i < list.length; i++) {
+    const n = list[i];
+    const gapMs = n.start.getTime() - cur.end.getTime();
+
+    // 1分以内の隙間は連結（カレンダーの丸め誤差/秒ズレ吸収）
+    if (gapMs <= 60 * 1000) {
+      if (n.end > cur.end) cur.end = n.end;
+    } else {
+      merged.push(cur);
+      cur = { start: n.start, end: n.end };
+    }
+  }
+  merged.push(cur);
+
+  return merged;
+}
+
+
+
+// ==========================
+// 🧠 先読みキャッシュ（days配列用）
+// ==========================
+function getCachedDays(weekCode) {
+  const cache = CacheService.getScriptCache();
+  const cached = cache.get(`days_${weekCode}`);
+  return cached ? JSON.parse(cached) : null;
+}
+
+function setCachedDays(weekCode, days) {
+  const cache = CacheService.getScriptCache();
+  cache.put(`days_${weekCode}`, JSON.stringify(days), 900); // 秒数はお好みで（例：180秒 = 3分）
+}
+
+
+// ==========================
+//週busyキャッシュ getter/setter
+// ==========================
+function getCachedBusy_(weekCode) {
+  const cache = CacheService.getScriptCache();
+  const raw = cache.get(`busy_${weekCode}`);
+  if (!raw) return null;
+
+  const arr = JSON.parse(raw); // [{start:"...", end:"..."}, ...]
+  return arr.map(x => ({ start: new Date(x.start), end: new Date(x.end) }));
+}
+
+function setCachedBusy_(weekCode, busySlots, ttlSec = 900) {
+  const cache = CacheService.getScriptCache();
+  const serial = busySlots.map(x => ({
+    start: new Date(x.start).toISOString(),
+    end: new Date(x.end).toISOString()
+  }));
+  cache.put(`busy_${weekCode}`, JSON.stringify(serial), ttlSec);
+}
+
+// ==========================
+// 📅 1週間分の有効日を取得（B判定込み + excludePast）
+// ==========================
+function getTimeSlotCacheForWeek(weekDates) {
+  const cache = {};
+  if (!weekDates || weekDates.length === 0) return cache;
+
+  // ✅ B：共通の最終判定コンテキスト
+  const ctx = getReservationCtx_();
+
+  const start = new Date(weekDates[0]);
+  start.setHours(0, 0, 0, 0);
+
+  const end = new Date(weekDates[weekDates.length - 1]);
+  end.setHours(23, 59, 59, 999);
+
+  const weekCode = `W_${Utilities.formatDate(start, 'Asia/Tokyo', 'yyyyMMdd')}`;
+
+  // ✅ busy（週単位キャッシュ）
+  let allBusy = getCachedBusy_(weekCode);
+  if (allBusy) {
+    debugLog('⚡️ キャッシュ命中（busy）', { weekCode, count: allBusy.length });
+  } else {
+    allBusy = getBusySlots(start, end);
+    setCachedBusy_(weekCode, allBusy, 900);
+    debugLog('📦 busyキャッシュ保存', { weekCode, count: allBusy.length });
+  }
+
+  // ✅ “今”は1回だけ作る（当日判定のため）
+  const now = new Date();
+
+  for (const date0 of weekDates) {
+    const date = new Date(date0);
+    date.setHours(0, 0, 0, 0);
+
+    const dateStr = Utilities.formatDate(date, 'Asia/Tokyo', 'yyyyMMdd');
+
+    // ✅ B：そもそも予約可能日じゃなければ AM/PM は両方 false
+    if (!isReservableDay_(date, ctx)) {
+      cache[dateStr] = { date, hasAm: false, hasPm: false };
+
+      debugLog('🧪 week判定', {
+        dateStr,
+        rule: 'notReservable',
+        hasAm: false,
+        hasPm: false,
+        now: Utilities.formatDate(now, 'Asia/Tokyo', 'yyyy-MM-dd HH:mm'),
+      });
+
+      continue;
+    }
+
+    // ✅ 曜日ルール（none / am / pm / both / ok）で出す枠を制限
+    const weekday = date.getDay();
+    const rule = (ctx.weekdayRules && ctx.weekdayRules[weekday]) || 'ok';
+
+    let hasAm = false;
+    let hasPm = false;
+
+    if (rule !== 'none') {
+      if (rule === 'ok' || rule === 'both' || rule === 'am') {
+        hasAm = (TIME_SLOTS_AM || []).some(slot =>
+          isSlotFree(date, slot, allBusy, { excludePast: true, now })
+        );
+      }
+
+      if (rule === 'ok' || rule === 'both' || rule === 'pm') {
+        hasPm = (TIME_SLOTS_PM || []).some(slot =>
+          isSlotFree(date, slot, allBusy, { excludePast: true, now })
+        );
+      }
+    }
+
+    cache[dateStr] = { date, hasAm, hasPm };
+
+    // ✅ ログはここ（全部決まった後）
+    debugLog('🧪 week判定', {
+      dateStr,
+      rule,
+      hasAm,
+      hasPm,
+      now: Utilities.formatDate(now, 'Asia/Tokyo', 'yyyy-MM-dd HH:mm'),
+    });
+  }
+
+  return cache;
+}
+
+
+// ✅ 特定の時間帯が空いているか（高速版）
+// options: { now: Date, excludePast: boolean }
+function isSlotFree(date, timeRange, busyList, options = {}) {
+  const s = String(timeRange || '');
+  if (!s.includes('〜')) return false;
+
+  const [sh, sm] = s.split('〜')[0].split(':');
+  const [eh, em] = s.split('〜')[1].split(':');
+
+  const y = date.getFullYear();
+  const m = date.getMonth();
+  const d = date.getDate();
+
+  const start = new Date(y, m, d, parseInt(sh, 10), parseInt(sm, 10), 0);
+  const end = new Date(y, m, d, parseInt(eh, 10), parseInt(em, 10), 0);
+
+  // ✅ 当日だけ「過去枠」を除外（終了時刻が過ぎた枠は false）
+  if (options.excludePast) {
+    const now = options.now || new Date();
+
+    const today0 = new Date(now);
+    today0.setHours(0, 0, 0, 0);
+
+    const day0 = new Date(y, m, d);
+    day0.setHours(0, 0, 0, 0);
+
+    if (day0.getTime() === today0.getTime()) {
+      if (end.getTime() <= now.getTime()) return false;
+    }
+  }
+
+  return !busyList.some(ev => start < ev.end && end > ev.start);
+}
+
+function getDaysInWeek(weekStartDate, holidays, excluded, options = {}) {
+  const days = [];
+
+  const start = new Date(weekStartDate);
+  start.setHours(0, 0, 0, 0);
+
+  const targetMonth =
+    (options.targetMonth !== undefined) ? options.targetMonth : start.getMonth();
+
+  // ✅ B：判定に使うコンテキスト（祝日・除外・曜日ルール・minDaysAheadなど）
+  // options が来てる場合は上書きできるようにする（互換性保つ）
+  const ctx = getReservationCtx_({
+    weekdayRules: options.weekdayRules,
+    minDaysAhead: options.minDaysAhead
+  });
+
+  for (let i = 0; i < 7; i++) {
+    const date = new Date(start);
+    date.setDate(start.getDate() + i);
+    date.setHours(0, 0, 0, 0);
+
+    // 月跨ぎは表示しない（従来仕様）
+    if (date.getMonth() !== targetMonth) continue;
+
+    // ✅ B判定：祝日 / 営業除外日 / 曜日ルール / minDaysAhead
+    if (!isReservableDay_(date, ctx)) continue;
+
+    const ymd = Utilities.formatDate(date, 'Asia/Tokyo', 'yyyyMMdd');
+    days.push({
+      label: `${date.getMonth() + 1}月${date.getDate()}日（${getJapaneseDayOfWeek(date)}）`,
+      value: ymd
+    });
+  }
+
+  return days;
+}
+
+
+// ✅ 営業除外日を取得（別シートを参照する想定）
+function getExcludedDates() {
+  try {
+    const sheet = SpreadsheetApp.openById(SHEET_ID).getSheetByName(EXCLUDED_SHEET_NAME);
+    const data = sheet.getDataRange().getValues();
+
+    const excluded = [];
+    const overrides = [];
+
+    data.forEach(row => {
+      const [date, status] = row;
+      if (!(date instanceof Date)) return;
+
+      const iso = Utilities.formatDate(date, 'Asia/Tokyo', 'yyyy-MM-dd');
+
+      if (status === EXCLUDE_STATUS_CLOSED) {
+        excluded.push(iso);
+      } else if (status === EXCLUDE_STATUS_OPEN) {
+        overrides.push({ iso, override: true });
+      }
+    });
+
+    return [...excluded, ...overrides];
+  } catch (e) {
+    debugLog('❌ 営業除外日読み込みエラー', e.toString());
+    return [];
+  }
+}
+
+
+// ✨ これをその下に入れる
+function getAllHolidaysWithOverrides() {
+  const today = new Date();
+  const holidays = [];
+  const calendar = CalendarApp.getCalendarById(JP_HOLIDAY_CALENDAR_ID);
+  const overrides = getExcludedDates()
+    .filter(x => x && typeof x === 'object' && x.override)
+    .map(x => x.iso);
+
+  for (let i = 0; i < 12; i++) {
+    const target = new Date(today.getFullYear(), today.getMonth() + i, 1);
+    const start = new Date(target.getFullYear(), target.getMonth(), 1);
+    const end = new Date(target.getFullYear(), target.getMonth() + 1, 0);
+    end.setHours(23, 59, 59, 999);
+    const events = calendar.getEvents(start, end);
+
+    for (const e of events) {
+      const dateStr = Utilities.formatDate(e.getStartTime(), 'Asia/Tokyo', 'yyyy-MM-dd');
+      if (!overrides.includes(dateStr)) {
+        holidays.push(dateStr);
+      }
+    }
+  }
+
+  return [...new Set(holidays)];
+}
+
+
+// ==========================
+// 🎌 祝日一覧をスプレッドシートから取得
+// ==========================
+function writeHolidaysToSheet() {
+  const calendar = CalendarApp.getCalendarById(JP_HOLIDAY_CALENDAR_ID);
+  const sheet = SpreadsheetApp.openById(SHEET_ID).getSheetByName(SHEET_NAME_HOLIDAYS);
+
+  // データ部分だけクリア（ヘッダーは残す）
+  const lastRow = sheet.getLastRow();
+  if (lastRow > 1) {
+    sheet.getRange(2, 1, lastRow - 1, 3).clearContent();
+  }
+
+  const thisYear = new Date().getFullYear();
+  const start = new Date(thisYear, 0, 1);             // 1月1日
+  const end = new Date(thisYear + 1, 11, 31);         // 翌年12月31日
+  const events = calendar.getEvents(start, end);
+
+  events.forEach((event, i) => {
+    const dateStr = Utilities.formatDate(event.getStartTime(), 'Asia/Tokyo', 'yyyy-MM-dd');
+    sheet.getRange(i + 2, 1).setValue(dateFromYmd_(dateStr));
+    sheet.getRange(i + 2, 2).setValue('祝日');
+    sheet.getRange(i + 2, 3).setValue(event.getTitle());
+  });
+}
+
+function writeHolidaysOnceAYear() {
+  const now = new Date();
+  if (now.getMonth() === 11) { // 12月（0-indexed）
+    writeHolidaysToSheet();
+  }
+}
+
+
+// ==========================
+// 🎌 getHolidaysの簡易ラッパー関数
+// ==========================
+function getHolidays(year, month) {
+  const all = getAllHolidaysWithOverrides() || [];
+
+  return all
+    .map(v => toYmd_(v))          // "yyyy-MM-dd" に正規化（{iso} や Date も吸収）
+    .filter(Boolean)
+    .filter(ymd => {
+      // Dateにせず文字列で判定（TZズレ事故を根絶）
+      return Number(ymd.slice(0, 4)) === year &&
+        Number(ymd.slice(5, 7)) === month;
+    });
+}
+
+
+// ==========================
+// 📅 曜日を日本語で取得
+// ==========================
+function getJapaneseDayOfWeek(date) {
+  const days = ['日', '月', '火', '水', '木', '金', '土'];
+  return days[date.getDay()];
+}
+
+function formatFullDateJp(input) {
+  let date;
+
+  if (Object.prototype.toString.call(input) === '[object Date]') {
+    // 入力がDateオブジェクトの場合
+    date = input;
+  } else if (typeof input === 'string') {
+    // 入力が "2025-06-09" 形式ならハイフンを除去
+    const clean = input.replace(/-/g, '');
+    if (/^\d{8}$/.test(clean)) {
+      const y = parseInt(clean.slice(0, 4), 10);
+      const m = parseInt(clean.slice(4, 6), 10) - 1;
+      const d = parseInt(clean.slice(6, 8), 10);
+      date = new Date(y, m, d);
+    }
+  }
+
+  if (!date || isNaN(date.getTime())) return '日付不明';
+
+  const jpDay = getJapaneseDayOfWeek(date);
+  return Utilities.formatDate(date, 'Asia/Tokyo', `yyyy年M月d日（${jpDay}）`);
+}
+
+// ==========================
+// 📌 ユーザーの予約件数をカウント
+// ==========================
+function countUserReservations(userId) {
+  const sheet = SpreadsheetApp.openById(SHEET_ID).getSheetByName(SHEET_NAME);
+  const data = sheet.getDataRange().getValues();
+
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+
+  return data.slice(1).filter(row => {
+    const rUserId = String(row[COL.USER_ID] || "");
+    const rStatus = String(row[COL.STATUS] || "");
+
+    const dateCell = row[COL.DATE];
+    const rDate = (dateCell instanceof Date)
+      ? new Date(dateCell.getFullYear(), dateCell.getMonth(), dateCell.getDate())
+      : new Date(String(dateCell).replace(/-/g, '/')); // "yyyy/MM/dd" 想定
+
+    return rUserId === userId && rStatus === STATUS_RESERVED && rDate >= today;
+  }).length;
+}
+
+
+function getCachedBusyForDay_(dateStr) {
+  const cache = CacheService.getScriptCache();
+  const raw = cache.get(`busyDay_${dateStr}`);
+  if (!raw) return null;
+  const arr = JSON.parse(raw);
+  return arr.map(x => ({
+    start: new Date(x.start),
+    end: new Date(x.end),
+  }));
+}
+
+function setCachedBusyForDay_(dateStr, busySlots, ttlSec = 900) {
+  const cache = CacheService.getScriptCache();
+  const serial = busySlots.map(x => ({
+    start: new Date(x.start).toISOString(),
+    end: new Date(x.end).toISOString(),
+  }));
+  cache.put(`busyDay_${dateStr}`, JSON.stringify(serial), ttlSec);
+}
+
+
+
+// ==========================
+// 🕰 午前・午後の時間帯を返す関数（isSlotFree統一版）
+// ==========================
+function getTimeSlotsForPeriod(msg) {
+  const dateStr = msg.split('_')[0];   // "yyyyMMdd"
+  const isAM = msg.includes('_AM');
+  const slots = isAM ? (TIME_SLOTS_AM || []) : (TIME_SLOTS_PM || []);
+
+  const y = dateStr.slice(0, 4);
+  const mo = dateStr.slice(4, 6);
+  const d = dateStr.slice(6);
+
+  // dayStart/dayEnd（その日のbusy取得）
+  const dayStart = new Date(`${y}-${mo}-${d}T00:00:00+09:00`);
+  const dayEnd = new Date(`${y}-${mo}-${d}T23:59:59+09:00`);
+
+  // busy（1日単位キャッシュ）
+  let busySlots = getCachedBusyForDay_(dateStr);
+  if (!busySlots) {
+    busySlots = getBusySlots(dayStart, dayEnd);
+    setCachedBusyForDay_(dateStr, busySlots, 900);
+  }
+
+  const now = new Date();
+
+  return slots.map(timeRange => {
+    // ✅ 共通関数に判定を寄せる（当日の過去枠除外も同じロジック）
+    const day = new Date(`${y}-${mo}-${d}T00:00:00+09:00`);
+    const ok = isSlotFree(day, timeRange, busySlots, { excludePast: true, now });
+    if (!ok) return null;
+
+    // 表示用ラベル生成（今のままでOK）
+    const [sh, sm] = String(timeRange).split('〜')[0].split(':');
+    const [eh, em] = String(timeRange).split('〜')[1].split(':');
+    const label = `${parseInt(sh, 10)}:${sm}〜${parseInt(eh, 10)}:${em}`;
+
+    return { label, text: `${dateStr}_${timeRange}`, type: 'message' };
+  }).filter(Boolean);
+}
+
+
+
+function isAllSlotsReserved(dateStr, period) {
+  const slots = period === 'AM' ? TIME_SLOTS_AM : TIME_SLOTS_PM;
+  const sheet = SpreadsheetApp.openById(SHEET_ID).getSheetByName(SHEET_NAME);
+  const data = sheet.getDataRange().getValues();
+
+  const reserved = data.slice(1)
+    .filter(row => {
+      const d = row[2] instanceof Date
+        ? Utilities.formatDate(row[2], 'Asia/Tokyo', 'yyyyMMdd')
+        : String(row[2] || '').replaceAll('/', '').replaceAll('-', '');
+      const status = String(row[COL.STATUS] || ''); // ✅ I列
+      return d === dateStr && status === STATUS_RESERVED;
+    })
+    .map(row => String(row[3] || '')); // D列：時間帯
+
+  return slots.every(slot => reserved.includes(slot));
+}
+
+
+
+
+// ==========================
+// ✅ 予約可能日かどうか判定する関数
+// ==========================
+function isValidReservationDay(date, holidays, excluded, options = {}) {
+  const ctx = getReservationCtx_({
+    weekdayRules: options.weekdayRules,
+    minDaysAhead: options.minDaysAhead
+  });
+  return isReservableDay_(date, ctx);
+}
+
+
+// ==========================
+// ✅ APIでもLINEでも使う「何日後から予約OK」判定
+// ==========================
+function isDateAllowedByMinDays_(yyyyMMdd) {
+  if (!/^\d{8}$/.test(String(yyyyMMdd))) return false;
+
+  const y = Number(yyyyMMdd.slice(0, 4));
+  const m = Number(yyyyMMdd.slice(4, 6)) - 1;
+  const d = Number(yyyyMMdd.slice(6, 8));
+
+  const target = new Date(y, m, d);
+  target.setHours(0, 0, 0, 0);
+
+  const min = new Date();
+  min.setHours(0, 0, 0, 0);
+  min.setDate(min.getDate() + MIN_DAYS_AHEAD);
+
+  return target >= min;
+}
+
+
+function dateFromYmd_(ymd) {
+  const s = String(ymd).trim().replace(/\//g, '-'); // ← / を - に寄せる
+  const [y, m, d] = s.split('-').map(Number);
+  return new Date(y, (m - 1), d);
+}
+
+
+// ==========================
+// 🗓️ 月内の週単位データを生成（日曜始まり版）
+// ==========================
+// 🗓️ 月内の週リストを生成（表示は月内でクリップ／週は日曜始まり）
+// ✅ 週の開始日（日曜）を YYYYMMDD に
+function toYyyyMMdd_(date) {
+  return Utilities.formatDate(date, 'Asia/Tokyo', 'yyyyMMdd');
+}
+
+function getWeekdayRanges(year, month, holidays, excludedDates) {
+  const results = [];
+
+  const firstDayOfMonth = new Date(year, month - 1, 1);
+  firstDayOfMonth.setHours(0, 0, 0, 0);
+
+  const lastDayOfMonth = new Date(year, month, 0);
+  lastDayOfMonth.setHours(0, 0, 0, 0);
+
+  const startSunday = new Date(firstDayOfMonth);
+  startSunday.setDate(firstDayOfMonth.getDate() - firstDayOfMonth.getDay());
+  startSunday.setHours(0, 0, 0, 0);
+
+  // ✅ B：判定に使うコンテキスト（祝日・除外・曜日ルール・minDaysAheadなど）
+  const ctx = getReservationCtx_();
+
+  for (let weekStart = new Date(startSunday); weekStart <= lastDayOfMonth;) {
+    const weekEnd = new Date(weekStart);
+    weekEnd.setDate(weekStart.getDate() + 6);
+    weekEnd.setHours(0, 0, 0, 0);
+
+    const rangeStart = new Date(Math.max(weekStart.getTime(), firstDayOfMonth.getTime()));
+    const rangeEnd = new Date(Math.min(weekEnd.getTime(), lastDayOfMonth.getTime()));
+
+    let hasValidDay = false;
+    for (let d = new Date(rangeStart); d <= rangeEnd; d.setDate(d.getDate() + 1)) {
+      const day = new Date(d);
+      day.setHours(0, 0, 0, 0);
+
+      // ✅ ここをBに置き換え（祝日/除外/曜日/minDaysAhead を全部ここで判定）
+      if (isReservableDay_(day, ctx)) {
+        hasValidDay = true;
+        break;
+      }
+    }
+
+    if (hasValidDay) {
+      const startLabel = Utilities.formatDate(rangeStart, 'Asia/Tokyo', 'M/d');
+      const endLabel = Utilities.formatDate(rangeEnd, 'Asia/Tokyo', 'M/d');
+      const label = (startLabel === endLabel) ? `${startLabel}` : `${startLabel}〜${endLabel}`;
+
+      results.push({ label, value: `W_${toYyyyMMdd_(weekStart)}` });
+    }
+
+    weekStart.setDate(weekStart.getDate() + 7);
+    weekStart.setHours(0, 0, 0, 0);
+  }
+
+  return results;
+}
+
+// ✅ 呼び出し元の例（週リスト取得時）
+function handleShowWeekList(year, month) {
+  const holidays = getAllHolidaysWithOverrides();
+  const excludedDates = getExcludedDates();
+  return getWeekdayRanges(year, month, holidays, excludedDates);
+}
+
+
+// ==========================
+// 📌 キャンセル・復活処理
+// ==========================
+function cancelReservation(reservationId, userId) {
+  try {
+    debugLog('🚨 cancelReservation呼び出し', { reservationId, userId });
+
+    const sheet = SpreadsheetApp.openById(SHEET_ID).getSheetByName(SHEET_NAME);
+    const data = sheet.getDataRange().getValues();
+
+    for (let i = 1; i < data.length; i++) {
+      const row = data[i];
+      if (row[0] == reservationId && row[1] == userId) {
+        sheet.getRange(i + 1, 9).setValue(STATUS_CANCELED); // ステータス変更
+        debugLog('✅ キャンセル完了', { row });
+
+        // 🔧 カレンダーのイベントタイトルに [キャンセル] を追記
+        const timeRange = String(row[COL.TIME] || row[3] || '');
+        const [sh, sm] = timeRange.split('〜')[0].split(':');
+        const [eh, em] = timeRange.split('〜')[1].split(':');
+
+        const dateStr = (row[COL.DATE] instanceof Date)
+          ? Utilities.formatDate(row[COL.DATE], 'Asia/Tokyo', 'yyyy-MM-dd')
+          : String(row[COL.DATE] || row[2] || '').trim().replace(/\//g, '-');
+
+        const start = new Date(`${dateStr}T${String(sh).padStart(2, '0')}:${sm}:00+09:00`);
+        const end = new Date(`${dateStr}T${String(eh).padStart(2, '0')}:${em}:00+09:00`);
+
+        const events = CalendarApp.getCalendarById(CALENDAR_ID).getEvents(start, end);
+
+        events.forEach(event => {
+          const title = event.getTitle();
+          if (!title.includes(`[予約 #${reservationId}]`)) return;
+          if (!title.includes(STATUS_CANCELED_PREFIX)) {
+            event.setTitle(`${STATUS_CANCELED_PREFIX} ${title}`);
+          }
+        });
+
+        CacheService.getScriptCache().remove(`busyDay_${Utilities.formatDate(start, 'Asia/Tokyo', 'yyyyMMdd')}`);
+
+        return true;
+      }
+    }
+
+    debugLog('❌ 対象の予約が見つかりません', { reservationId });
+    return false;
+  } catch (e) {
+    debugLog('❌ cancelReservationエラー', e.toString());
+    return false;
+  }
+}
+
+function restoreReservation(reservationId, userId) {
+  try {
+    debugLog('🚨 restoreReservation呼び出し', { reservationId, userId });
+
+    const sheet = SpreadsheetApp.openById(SHEET_ID).getSheetByName(SHEET_NAME);
+    const data = sheet.getDataRange().getValues();
+
+    for (let i = 1; i < data.length; i++) {
+      const row = data[i];
+      if (row[0] == reservationId && row[1] == userId) {
+
+        // ========= ① 予約枠の start / end を作る =========
+        const timeRange = String(row[COL.TIME] || row[3] || '');
+        const [sh, sm] = timeRange.split('〜')[0].split(':');
+        const [eh, em] = timeRange.split('〜')[1].split(':');
+
+        const dateStr = (row[COL.DATE] instanceof Date)
+          ? Utilities.formatDate(row[COL.DATE], 'Asia/Tokyo', 'yyyy-MM-dd')
+          : String(row[COL.DATE] || row[2] || '').trim().replace(/\//g, '-');
+
+        const start = new Date(`${dateStr}T${String(sh).padStart(2, '0')}:${sm}:00+09:00`);
+        const end = new Date(`${dateStr}T${String(eh).padStart(2, '0')}:${em}:00+09:00`);
+
+        // ② 枠が空いてるか確認（Freebusy）
+        const busy = getBusySlots(start, end, { force: true }); // forceは任意。復活は厳密にしたいならtrueおすすめ
+        const canRestore = !busy.some(ev => start < ev.end && end > ev.start);
+
+        if (!canRestore) {
+          debugLog('⚠️ 復活不可：枠が埋まっています', { reservationId, start, end });
+          return false;
+        }
+
+        // ========= ③ OKならシートを復活 =========
+        sheet.getRange(i + 1, 9).setValue(STATUS_RESERVED);
+        debugLog('✅ 復活完了（シート更新）', { reservationId });
+
+        // ========= ④ カレンダーの [キャンセル] を外す =========
+        const events = CalendarApp.getCalendarById(CALENDAR_ID).getEvents(start, end);
+        events.forEach(event => {
+          const title = event.getTitle();
+          if (!title.includes(`[予約 #${reservationId}]`)) return;
+          if (title.includes(STATUS_CANCELED_PREFIX)) {
+            event.setTitle(title.replace(`${STATUS_CANCELED_PREFIX} `, ''));
+          }
+        });
+
+        debugLog('✅ 復活完了（カレンダー更新）', { reservationId });
+
+        CacheService.getScriptCache().remove(`busyDay_${Utilities.formatDate(start, 'Asia/Tokyo', 'yyyyMMdd')}`);
+
+        return true;
+      }
+    }
+
+    debugLog('❌ 対象の予約が見つかりません', { reservationId });
+    return false;
+
+  } catch (e) {
+    debugLog('❌ restoreReservationエラー', e.toString());
+    return false;
+  }
+}
+
+
+// ==========================
+// 📌 キャンセル・復活処理
+// ==========================
+function handleCancel(replyToken, userId, data) {
+  const reservationId = data.split(':')[1].split('_')[0];
+
+  debugLog('🔁 handleCancel呼び出し', { reservationId, userId });
+
+  cancelReservation(reservationId, userId);
+
+  const message = `✅ ご予約をキャンセルしました\n（予約ID: ${reservationId}）`;
+
+  debugLog('📤 キャンセル返信内容', message);
+
+  return sendReply(replyToken, [{ type: 'text', text: message }], userId);
+}
+
+
+function handleRestore(replyToken, userId, data) {
+  const reservationId = data.split(':')[1].split('_')[0];
+
+  debugLog('🔁 handleRestore呼び出し', { reservationId, userId });
+
+  const ok = restoreReservation(reservationId, userId);
+
+  const message = ok
+    ? `🔁 ご予約を再度お取りしました\n（予約ID: ${reservationId}）`
+    : `⚠️ 申し訳ありません。その時間はすでに埋まっているため、再予約できませんでした。\n（予約ID: ${reservationId}）`;
+
+  debugLog('📤 再予約返信内容', message);
+
+  return sendReply(replyToken, [{ type: 'text', text: message }], userId);
+}
+
+
+// 📌 本番向け：Googleカレンダー → スプレッドシート 同期スクリプト
+// ------------------------------------------------------------
+// Googleカレンダーのイベント内容に基づいて、
+// スプレッドシートの予約情報を自動で更新します。
+// 予約ID（例：[予約 #A123]）を元に照合します。
+function syncCalendarToSheet_Prod() {
+  const calendar = CalendarApp.getCalendarById(CALENDAR_ID);
+  const sheet = SpreadsheetApp.openById(SHEET_ID).getSheetByName(SHEET_NAME);
+  const data = sheet.getDataRange().getValues();
+
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const future = new Date(today);
+  future.setDate(future.getDate() + 30); // 今後30日分
+
+  const events = calendar.getEvents(today, future);
+  const calendarIds = new Set(); // カレンダーにある予約ID一覧
+  let updatedCount = 0;
+  let canceledCount = 0;
+
+  // 🔄 カレンダーのイベントから予約内容を同期
+  events.forEach(event => {
+    const title = event.getTitle();
+    const match = title.match(/\[予約\s?#([A-Za-z0-9\-]+)\]/);
+    if (!match) return;
+
+    const resId = match[1];
+    calendarIds.add(resId);
+
+    const start = event.getStartTime();
+    const end = event.getEndTime();
+
+    const dateStr = Utilities.formatDate(start, 'Asia/Tokyo', 'yyyy/MM/dd');
+    const timeStr = `${Utilities.formatDate(start, 'Asia/Tokyo', 'HH:mm')}〜${Utilities.formatDate(end, 'Asia/Tokyo', 'HH:mm')}`;
+
+    for (let i = 1; i < data.length; i++) {
+      if (data[i][0] === resId) {
+        const currentDateStr = (data[i][2] instanceof Date)
+          ? Utilities.formatDate(data[i][2], 'Asia/Tokyo', 'yyyy/MM/dd')
+          : String(data[i][2] || '').trim();
+
+        const currentTimeStr = String(data[i][3] || '').trim();
+
+        if (currentDateStr !== dateStr || currentTimeStr !== timeStr) {
+          sheet.getRange(i + 1, 3).setValue(dateStr);
+          sheet.getRange(i + 1, 4).setValue(timeStr);
+          updatedCount++;
+        }
+        break;
+      }
+    }
+  });
+
+  // ❌ カレンダーにない予約を「キャンセル済」に更新（30日以内だけ）
+  for (let i = 1; i < data.length; i++) {
+    const resId = data[i][0];
+    const status = data[i][8];
+    const dateCell = data[i][2]; // C列: 日付
+
+    // 予約日を Date に寄せる（"yyyy/MM/dd" と Date 両対応）
+    let d;
+    if (dateCell instanceof Date) {
+      d = new Date(dateCell.getFullYear(), dateCell.getMonth(), dateCell.getDate());
+    } else {
+      const s = String(dateCell || '').trim().replace(/-/g, '/');
+      const parts = s.split('/');
+      if (parts.length !== 3) continue;
+      d = new Date(Number(parts[0]), Number(parts[1]) - 1, Number(parts[2]));
+    }
+    if (isNaN(d.getTime())) continue;
+
+    // ✅ 今日〜30日以内だけを対象にする ← ここが改善ポイント
+    const withinWindow = d >= today && d <= future;
+    if (!withinWindow) continue;
+
+    if (!calendarIds.has(resId) && status === STATUS_RESERVED) {
+      sheet.getRange(i + 1, 9).setValue(STATUS_CANCELED);
+      canceledCount++;
+    }
+  }
+
+  Logger.log(`✅ 同期完了：${updatedCount} 件の予約を更新、${canceledCount} 件をキャンセル済に変更`);
+}
+
+function buildReservationMessage(type, [reservationId, userId, dateStr, timeRange, name, tel, note]) {
+  const typeLabel = type === '予約' ? '【新規予約】' : '【再予約】';
+
+  const noteLine = (note && String(note).trim())
+    ? `\n備考：${String(note).trim()}`
+    : '';
+
+  const text =
+    `${typeLabel}\n` +
+    `予約ID：${reservationId}\n` +
+    `日付：${formatFullDateJp(dateStr)}\n` +
+    `時間：${timeRange}\n` +
+    `名前：${name}\n` +
+    `電話番号：${tel}` +
+    noteLine;
+
+  debugLog('📤 管理者通知内容', text);
+
+  return { type: 'text', text };
+}
+
+
+// ★ 実行中だけ使うコンテキスト（userId退避）
+var __CTX_USER_ID__ = '';
+
+function setCtxUserId_(userId) {
+  __CTX_USER_ID__ = String(userId || '').trim();
+}
+
+function getCtxUserId_() {
+  return String(__CTX_USER_ID__ || '').trim();
+}
+
+function sendReply(replyToken, messages, userId) {
+  const uid = String(userId || getCtxUserId_() || '').trim();
+  const msgs = Array.isArray(messages) ? messages : [messages];
+
+  // replyToken 無いなら最初からpush
+  if (!replyToken) {
+    if (!uid) {
+      debugLog('❌ sendReply: userId missing', { messages: msgs });
+      return;
+    }
+    return pushMessage(uid, msgs);
+  }
+
+  // reply を試す（ただし使い切りならここで失敗する）
+  const res = UrlFetchApp.fetch(LINE_URL, {
+    method: 'post',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${LINE_TOKEN}`
+    },
+    muteHttpExceptions: true,
+    payload: JSON.stringify({ replyToken, messages: msgs })
+  });
+
+  const code = res.getResponseCode();
+  const body = res.getContentText();
+
+  // ✅ 成功なら終わり
+  if (code === 200) {
+    debugLog('✅ sendReply reply OK', body);
+    return;
+  }
+
+  // ✅ 失敗したらpushにフォールバック（replyToken使い切り想定）
+  debugLog('⚠️ sendReply reply failed -> push fallback', { code, body });
+
+  if (!uid) {
+    debugLog('❌ sendReply fallback: userId missing', { code, body });
+    return;
+  }
+  return pushMessage(uid, msgs);
+}
+
+
+function replyText(replyToken, text, userId) {
+  return sendReply(replyToken, [{ type: 'text', text: String(text) }], userId);
+}
+
+

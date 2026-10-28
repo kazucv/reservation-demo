@@ -661,7 +661,13 @@ async function fetchSlotsYm(ym, opts = {}) {
 
   // force の時はフロントキャッシュを無視
   if (!force) {
-    if (slotsCache.has(ym)) return slotsCache.get(ym);
+    if (slotsCache.has(ym)) {
+      const age = Date.now() - (slotsCacheSavedAt_.get(ym) || 0);
+      if (age >= 0 && age < 60000) return slotsCache.get(ym);
+      slotsCache.delete(ym);
+      slotsCacheSavedAt_.delete(ym);
+      invalidateAvailableDaysSet();
+    }
     if (slotsInFlight.has(ym)) return await slotsInFlight.get(ym);
   } else {
     slotsCache.delete(ym);
@@ -688,6 +694,7 @@ async function fetchSlotsYm(ym, opts = {}) {
     }
 
     slotsCache.set(ym, data.slots);
+    slotsCacheSavedAt_.set(ym, Date.now());
     invalidateAvailableDaysSet();
     return data.slots;
   })();
@@ -727,7 +734,7 @@ function buildAvailableDaysSet() {
   return set;
 }
 
-let didForceWarm = false;
+const slotsCacheSavedAt_ = new Map();
 
 function initFlatpickr() {
   if (!window.flatpickr) {
@@ -762,8 +769,7 @@ function initFlatpickr() {
       try {
         log("枠を取得中...");
 
-        const slots = await fetchSlotsYm(ym, { force: !didForceWarm });
-        didForceWarm = true;
+        const slots = await fetchSlotsYm(ym);
 
         if (slots === null) {
           log("通信が不安定みたい。もう一度試してね");

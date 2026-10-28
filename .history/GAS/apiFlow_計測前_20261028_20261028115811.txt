@@ -1,0 +1,899 @@
+function verifyLineAccessToken_(accessToken) {
+  const token = String(accessToken || "").trim();
+  if (!token) return { ok: false, message: "accessToken_required" };
+
+  // 同じtokenで何回もLINEへ行かない（軽くキャッシュ）
+  const cache = CacheService.getScriptCache();
+  const digest = Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, token);
+  const key = digest.map(b => ('0' + (b & 0xff).toString(16)).slice(-2)).join('').slice(0, 32);
+  const cacheKey = "lineuid:" + key;
+  const hit = cache.get(cacheKey);
+  if (hit) return { ok: true, userId: hit };
+
+  const url = "https://api.line.me/v2/profile";
+  const res = UrlFetchApp.fetch(url, {
+    method: "get",
+    headers: { Authorization: "Bearer " + token },
+    muteHttpExceptions: true,
+  });
+
+  if (res.getResponseCode() !== 200) {
+    return { ok: false, message: "line_token_invalid" };
+  }
+
+  const data = JSON.parse(res.getContentText() || "{}");
+  const uid = String(data.userId || "").trim();
+  if (!uid) return { ok: false, message: "line_userId_missing" };
+
+  cache.put(cacheKey, uid, 5 * 60);
+  return { ok: true, userId: uid };
+}
+
+function withCacheJson_(key, ttlSec, fn) {
+  const cache = CacheService.getScriptCache();
+  const hit = cache.get(key);
+  if (hit) return JSON.parse(hit);
+
+  const value = fn(); // 重い処理
+  cache.put(key, JSON.stringify(value), ttlSec);
+  return value;
+}
+
+function invalidateCaches_(userId, ymd, idsKey) {
+  const cache = CacheService.getScriptCache();
+
+  const uid = String(userId || "").trim();
+  if (uid) {
+    cache.remove(`myres:${uid}:0`);
+    cache.remove(`myres:${uid}:1`);
+  }
+
+  const ymdFixed = toYmd_(ymd);
+  if (!ymdFixed) return;
+
+  const y = Number(ymdFixed.slice(0, 4));
+  const m = Number(ymdFixed.slice(5, 7));
+  const d = Number(ymdFixed.slice(8, 10));
+
+  const base = new Date(y, m - 1, d, 0, 0, 0);
+  const prev = new Date(y, m - 1, d - 1, 0, 0, 0);
+  const next = new Date(y, m - 1, d + 1, 0, 0, 0);
+
+  // ✅ 月 slots キャッシュ（前後月も消す）
+  const ymSet = new Set([
+    Utilities.formatDate(prev, TZ, "yyyyMM"),
+    Utilities.formatDate(base, TZ, "yyyyMM"),
+    Utilities.formatDate(next, TZ, "yyyyMM"),
+  ]);
+
+  const fixedIdsKey = idsKey || getIdsKey_();
+  for (const ym of ymSet) cache.remove(`slots:${ym}:${fixedIdsKey}`);
+
+  // ✅ 日busyキャッシュ（utils.gs 側）
+  const ymdCompact = ymdFixed.replaceAll("-", "");
+  cache.remove(`busyDay_${ymdCompact}`);
+
+  // ✅ 週busy/週daysキャッシュ（utils.gs 側）
+  const weekStart = new Date(base);
+  weekStart.setDate(weekStart.getDate() - weekStart.getDay()); // 日曜
+  const weekCode = `W_${Utilities.formatDate(weekStart, TZ, "yyyyMMdd")}`;
+  cache.remove(`busy_${weekCode}`);
+  cache.remove(`days_${weekCode}`);
+}
+
+function getIdsKey_() {
+  const ids = [CALENDAR_ID].concat(ADDITIONAL_CALENDAR_IDS || []).map(String);
+  ids.sort();
+  return Utilities.base64EncodeWebSafe(ids.join("|")).slice(0, 16);
+}
+
+
+// ==========================
+// LIFF slots (month)
+// body: { action:"getSlots", userId, ym:"YYYYMM" }
+// return: { ok:true, ym, slots:[{slotId,start,end}] }
+// ==========================
+function measuredSlotsOriginal_(body) {
+  debugLog('🟢 handleGetSlots', { ym: body.ym });
+  const ym = String(body.ym || "").trim();
+  if (!/^\d{6}$/.test(ym)) return { ok: false, message: "ym_invalid" };
+
+  const y = Number(ym.slice(0, 4));
+  const m = Number(ym.slice(4, 6)); // 1-12
+
+  const idsKey = getIdsKey_();
+
+  const cache = CacheService.getScriptCache();
+  const cacheKey = `slots:${ym}:${idsKey}`;
+
+  const force = (body && (
+    body.force === true ||
+    String(body.force) === "1" ||
+    String(body.force).toLowerCase() === "true"
+  ));
+
+  if (!force) {
+    const cached = cache.get(cacheKey);
+    if (__measureCtx_) __measureCtx_.slotsCache = cached ? "hit" : "miss";
+    if (cached) {
+      debugLog('⚡️ slotsキャッシュ命中', { cacheKey });
+      return JSON.parse(cached);
+    }
+  } else {
+    if (__measureCtx_) __measureCtx_.slotsCache = 'bypass';
+    debugLog('🔄 slots強制リフレッシュ', { cacheKey });
+    // force のときはキャッシュを読まずに下へ
+  }
+
+  const holidayYmdSet = measurePhase_("holidays", () => getHolidaysYmdSet_(y, m));
+  const excludedYmdSet = measurePhase_("excludedDates", () => getExcludedYmdSet_());
+
+  const slots = [];
+
+  // 月の start/end（JST）
+  const monthStart = new Date(y, m - 1, 1, 0, 0, 0);
+  const monthEnd = new Date(y, m, 1, 0, 0, 0);
+
+  // ✅ バッファ（前日0:00〜翌日0:00）
+  const rangeStart = new Date(monthStart);
+  rangeStart.setDate(rangeStart.getDate() - 1);
+
+  const rangeEnd = new Date(monthEnd);
+  rangeEnd.setDate(rangeEnd.getDate() + 1);
+
+  // busyAll はこの range で取る
+  const busyAll = measurePhase_("busyCalendars", () => getBusySlots(rangeStart, rangeEnd, { force }));
+
+
+  // ✅ 日ごとに切り出しておく（ymd -> busy[]）
+  const busyByYmd = new Map();
+
+  for (const ev of busyAll) {
+    // ev が跨ぐ可能性があるので、start日〜end日まで全部に入れる
+    const startYmd = Utilities.formatDate(ev.start, TZ, "yyyy-MM-dd");
+    const endYmd = Utilities.formatDate(ev.end, TZ, "yyyy-MM-dd");
+
+    // 同日ならそのまま
+    if (startYmd === endYmd) {
+      if (!busyByYmd.has(startYmd)) busyByYmd.set(startYmd, []);
+      busyByYmd.get(startYmd).push(ev);
+      continue;
+    }
+
+    // 跨ぐ場合：start日とend日、そして間の日も全部入れる（最大でも数日）
+    let cur = new Date(ev.start);
+    cur.setHours(0, 0, 0, 0);
+
+    const end = new Date(ev.end);
+    end.setHours(0, 0, 0, 0);
+
+    while (cur.getTime() <= end.getTime()) {
+      const ymd = Utilities.formatDate(cur, TZ, "yyyy-MM-dd");
+      if (!busyByYmd.has(ymd)) busyByYmd.set(ymd, []);
+      busyByYmd.get(ymd).push(ev);
+      cur.setDate(cur.getDate() + 1);
+    }
+  }
+
+  const daysInMonth = new Date(y, m, 0).getDate();
+  for (let d = 1; d <= daysInMonth; d++) {
+    const dateObj = new Date(y, m - 1, d, 0, 0, 0);
+    const ymd = Utilities.formatDate(dateObj, TZ, "yyyy-MM-dd");
+
+    if (!isYmdAllowedByMinDaysAhead_(dateObj, MIN_DAYS_AHEAD)) continue;
+    if (excludedYmdSet.has(ymd)) continue;
+    if (holidayYmdSet.has(ymd)) continue;
+
+    const weekday = dateObj.getDay();
+    const rule = WEEKDAY_RULES[weekday] || "ok";
+    if (rule === "none") continue;
+
+    let timeRanges = [];
+    if (rule === "ok" || rule === "both") {
+      timeRanges = [].concat(TIME_SLOTS_AM || [], TIME_SLOTS_PM || []);
+    } else if (rule === "am") {
+      timeRanges = [].concat(TIME_SLOTS_AM || []);
+    } else if (rule === "pm") {
+      timeRanges = [].concat(TIME_SLOTS_PM || []);
+    } else {
+      timeRanges = [].concat(TIME_SLOTS_AM || [], TIME_SLOTS_PM || []);
+    }
+
+    // ✅ その日のbusy（なければ空配列）
+    const dayBusy = busyByYmd.get(ymd) || [];
+
+    for (const tr of timeRanges) {
+      const parsed = parseTimeRangeOnYmd_(ymd, tr);
+      if (!parsed) continue;
+      const { start, end } = parsed;
+
+      const isBusy = dayBusy.some(ev => start < ev.end && end > ev.start);
+      if (isBusy) continue;
+
+      const slotId = ymd.replaceAll("-", "") + "_" + tr; // ✅ "YYYYMMDD_09:00〜11:00"
+      slots.push({
+        slotId,
+        start: Utilities.formatDate(start, TZ, "yyyy-MM-dd'T'HH:mm:ssXXX"),
+        end: Utilities.formatDate(end, TZ, "yyyy-MM-dd'T'HH:mm:ssXXX"),
+      });
+    }
+  }
+
+  const result = { ok: true, ym, slots };
+
+  // ✅ 強制更新でもキャッシュは更新してOK（次から速い）
+  cache.put(cacheKey, JSON.stringify(result), 15 * 60);
+  debugLog('📦 slotsキャッシュ保存', { cacheKey, count: slots.length });
+
+  return result;
+}
+
+
+// ==========================
+// helpers
+// ==========================
+
+function parseTimeRangeOnYmd_(ymd, timeRange) {
+  // timeRange: "10:00〜11:00"
+  const s = String(timeRange || "");
+  if (!s.includes("〜")) return null;
+
+  const [a, b] = s.split("〜");
+  const [sh, sm] = a.split(":");
+  const [eh, em] = b.split(":");
+  if (!sh || !sm || !eh || !em) return null;
+
+  const start = new Date(`${ymd}T${String(sh).padStart(2, "0")}:${String(sm).padStart(2, "0")}:00+09:00`);
+  const end = new Date(`${ymd}T${String(eh).padStart(2, "0")}:${String(em).padStart(2, "0")}:00+09:00`);
+  return { start, end };
+}
+
+function isYmdAllowedByMinDaysAhead_(dateObj, minDaysAhead) {
+  const n = Number(minDaysAhead || 0);
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+
+  const d = new Date(dateObj);
+  d.setHours(0, 0, 0, 0);
+
+  const min = new Date(today);
+  min.setDate(min.getDate() + n);
+
+  return d.getTime() >= min.getTime();
+}
+
+
+// --- 祝日/除外日（ここは既存関数に差し替えOK） ---
+function getHolidaysYmdSet_(year, month1to12) {
+  // 既に getHolidays(year, month) があるならそれを使ってOK
+  // ここは「無いときでも動く」最低限の空Set
+  try {
+    if (typeof getHolidays === "function") {
+      const holidays = getHolidays(year, month1to12) || [];
+      // holidays の中身が "yyyy-MM-dd" / "yyyy/MM/dd" / Date などバラバラでも吸収
+      const set = new Set();
+      holidays.forEach(v => {
+        const ymd = toYmd_(v);
+        if (ymd) set.add(ymd);
+      });
+      return set;
+    }
+  } catch (e) { }
+  return new Set();
+}
+
+function getExcludedYmdSet_() {
+  // 既に getExcludedDates() があるならそれを使ってOK
+  try {
+    if (typeof getExcludedDates === "function") {
+      const excluded = getExcludedDates() || [];
+      const set = new Set();
+      excluded.forEach(v => {
+        const ymd = toYmd_(v);
+        if (ymd) set.add(ymd);
+      });
+      return set;
+    }
+  } catch (e) { }
+  return new Set();
+}
+
+function toYmd_(v) {
+  // ✅ overrideオブジェクト対応
+  if (v && typeof v === "object" && v.iso) {
+    v = v.iso;
+  }
+
+  if (v instanceof Date && !isNaN(v.getTime())) {
+    return Utilities.formatDate(v, TZ, "yyyy-MM-dd");
+  }
+  const s = String(v || "").trim();
+  if (!s) return "";
+  // "yyyy/MM/dd" or "yyyy-MM-dd"
+  const m = s.replaceAll("/", "-").match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
+  if (!m) return "";
+  const y = m[1];
+  const mo = String(m[2]).padStart(2, "0");
+  const d = String(m[3]).padStart(2, "0");
+  return `${y}-${mo}-${d}`;
+}
+
+function measuredApiOriginal_(body) {
+  body = body || {};
+
+  // ✅ ここで本人確認して userId を確定
+  const v = measurePhase_("authentication", () => verifyLineAccessToken_(body.accessToken));
+  if (!v.ok) return { ok: false, message: v.message };
+
+  // ✅ body.userId は信用しない。ここで上書き。
+  body.userId = v.userId;
+
+  // ✅ ここ！ actionが確定してる
+  debugLog('🟡 apiFlow 通過', {
+    action: String(body.action || ''),
+    userId: body.userId,
+    ym: body.ym,
+    slotId: body.slotId,
+    reservationId: body.reservationId,
+  });
+
+
+  switch (body.action) {
+    case "getSlots":
+      return handleGetSlots_(body);
+    case "createReservation":
+      return handleCreateReservation_(body);
+    case "myReservations":
+      return handleMyReservations_(body);
+    case "cancelReservation":
+      return handleCancelReservation_(body);
+    case "restoreReservation":
+      return handleRestoreReservation_(body);
+    default:
+      return { ok: false, message: "not_implemented_yet" };
+  }
+}
+
+function handleCancelReservation_(body) {
+  debugLog('🟢 handleCancelReservation', { reservationId: body.reservationId });
+  const lock = LockService.getScriptLock();
+  try {
+    lock.waitLock(10000);
+
+    const userId = String(body.userId || "").trim();
+    const reservationId = String(body.reservationId || "").trim();
+    if (!userId) return { ok: false, message: "userId_required" };
+    if (!reservationId) return { ok: false, message: "reservationId_required" };
+
+    const sheet = SpreadsheetApp.openById(SHEET_ID).getSheetByName(SHEET_NAME);
+    if (!sheet) return { ok: false, message: "sheet_not_found" };
+
+    const lastRow = sheet.getLastRow();
+    if (lastRow < 2) return { ok: false, message: "not_found" };
+
+    const values = sheet.getRange(2, 1, lastRow - 1, sheet.getLastColumn()).getValues();
+
+    let targetRowIndex = -1;
+    let ymd = "";
+    let currentStatus = "";
+    let eventId = "";
+
+    for (let i = 0; i < values.length; i++) {
+      const row = values[i];
+      if (String(row[COL.USER_ID]) !== userId) continue;
+      if (String(row[COL.RESERVATION_ID]) !== reservationId) continue;
+
+      targetRowIndex = i + 2; // 実シート行
+      currentStatus = String(row[COL.STATUS] || "");
+      eventId = String(row[COL.EVENT_ID] || ""); // ← 追加
+
+      ymd = toYmd_(row[COL.DATE]);
+      break;
+    }
+
+    if (targetRowIndex < 0) return { ok: false, message: "not_found" };
+
+    // 冪等：すでにキャンセル済み
+    if (currentStatus === STATUS_CANCELED) {
+      invalidateCaches_(userId, ymd, getIdsKey_());
+      return { ok: true, reservationId, alreadyCanceled: true };
+    }
+
+    // eventId がない予約は、枠を空けられないので失敗扱いが安全
+    //（過去データ移行中だけ例外にしたいなら、ここは ok:true にしてもいい）
+    if (!eventId) {
+      return { ok: false, message: "eventId_missing" };
+    }
+
+    // ✅ カレンダーイベント削除（枠を空ける本体）
+    try {
+      const cal = CalendarApp.getCalendarById(CALENDAR_ID);
+      if (!cal) return { ok: false, message: "calendar_not_found" };
+
+      const ev = cal.getEventById(eventId);
+      if (!ev) {
+        // すでに消えてる等：ここは「空いてる」のでOKとして進めるのが運用強い
+      } else {
+        ev.deleteEvent();
+      }
+    } catch (e) {
+      return { ok: false, message: "calendar_delete_failed" };
+    }
+
+    // ✅ ステータス更新
+    sheet.getRange(targetRowIndex, COL.STATUS + 1).setValue(STATUS_CANCELED);
+
+    pushAdminText_(
+      `【キャンセル】\n` +
+      `予約ID：${reservationId}\n` +
+      `userId：${userId}`
+    );
+
+    // ✅ キャッシュ無効化
+    invalidateCaches_(userId, ymd, getIdsKey_());
+
+    try {
+      const msg =
+        `【キャンセル完了】
+予約ID：${reservationId}
+
+またのご予約お待ちしてます。`;
+      pushLineText_(userId, msg);
+    } catch (e) {
+      try { logLiff_("PUSH_FAIL", { where: "cancelReservation", reservationId, err: String(e) }); } catch { }
+    }
+
+    return { ok: true, reservationId };
+
+  } catch (e) {
+    return { ok: false, message: "lock_or_internal_error" };
+  } finally {
+    try { lock.releaseLock(); } catch (e) { }
+  }
+}
+
+function handleRestoreReservation_(body) {
+  debugLog('🟢 handleRestoreReservation', { reservationId: body.reservationId });
+
+  const lock = LockService.getScriptLock();
+  try {
+    lock.waitLock(10000);
+
+    const userId = String(body.userId || "").trim();
+    const reservationId = String(body.reservationId || "").trim();
+    if (!userId) return { ok: false, message: "userId_required" };
+    if (!reservationId) return { ok: false, message: "reservationId_required" };
+
+    const sheet = SpreadsheetApp.openById(SHEET_ID).getSheetByName(SHEET_NAME);
+    if (!sheet) return { ok: false, message: "sheet_not_found" };
+
+    const lastRow = sheet.getLastRow();
+    const lastCol = sheet.getLastColumn();
+    if (lastRow < 2) return { ok: false, message: "not_found" };
+
+    const values = sheet.getRange(2, 1, lastRow - 1, lastCol).getValues();
+
+    let targetRowIndex = -1;
+    let status = "";
+    let dateStr = "";     // yyyy/MM/dd or Date
+    let timeRange = "";   // "HH:mm〜HH:mm"
+    let name = "";
+    let tel = "";
+    let note = "";
+
+    for (let i = 0; i < values.length; i++) {
+      const row = values[i];
+      if (String(row[COL.USER_ID] || "") !== userId) continue;
+      if (String(row[COL.RESERVATION_ID] || "") !== reservationId) continue;
+
+      targetRowIndex = i + 2;
+      status = String(row[COL.STATUS] || "");
+      dateStr = row[COL.DATE];
+      timeRange = String(row[COL.TIME] || "");
+      name = String(row[COL.NAME] || "");
+      tel = String(row[COL.TEL] || "");
+      note = String(row[COL.NOTE] || "");
+      break;
+    }
+
+    if (targetRowIndex < 0) return { ok: false, message: "not_found" };
+
+    // すでに予約中なら冪等でOK（復活済み）
+    if (status === STATUS_RESERVED) {
+      const ymd = toYmd_(dateStr);
+      invalidateCaches_(userId, ymd, getIdsKey_());
+      return { ok: true, reservationId, alreadyReserved: true };
+    }
+
+    // キャンセル以外は想定外
+    if (status !== STATUS_CANCELED) {
+      return { ok: false, message: "status_not_cancelled" };
+    }
+
+    // 日付＆時間帯を start/end に
+    const ymd = toYmd_(dateStr);
+    if (!ymd) return { ok: false, message: "date_invalid" };
+
+    if (!timeRange.includes("〜")) return { ok: false, message: "time_invalid" };
+    const [a, b] = timeRange.split("〜");
+    const [sh, sm] = a.split(":");
+    const [eh, em] = b.split(":");
+    if (!sh || !sm || !eh || !em) return { ok: false, message: "time_invalid" };
+
+    const start = new Date(`${ymd}T${String(sh).padStart(2, "0")}:${String(sm).padStart(2, "0")}:00+09:00`);
+    const end = new Date(`${ymd}T${String(eh).padStart(2, "0")}:${String(em).padStart(2, "0")}:00+09:00`);
+
+    // 1msバッファ（境界ズレ吸収）
+    const start2 = new Date(start.getTime() + 1);
+    const end2 = new Date(end.getTime() - 1);
+
+    // ① 空きチェック（メイン＋追加）
+    const ids = [CALENDAR_ID].concat(ADDITIONAL_CALENDAR_IDS || []);
+    for (const id of ids) {
+      const calX = CalendarApp.getCalendarById(id);
+      if (!calX) continue;
+      const evs = calX.getEvents(start2, end2);
+      if (evs.length > 0) return { ok: false, message: "slot_already_reserved" };
+    }
+
+    // ② イベント作り直し（メイン）
+    const cal = CalendarApp.getCalendarById(CALENDAR_ID);
+    if (!cal) return { ok: false, message: "calendar_not_found" };
+
+    const title = `[予約 #${reservationId}] ${name}`;
+    const desc = [
+      `reservationId: ${reservationId}`,
+      `userId: ${userId}`,
+      `tel: ${tel}`,
+      note ? `note: ${note}` : ""
+    ].filter(Boolean).join("\n");
+
+    let event;
+    try {
+      event = cal.createEvent(title, start, end, { description: desc });
+    } catch (e) {
+      return { ok: false, message: "calendar_create_failed" };
+    }
+
+    // ③ シート復活（STATUS と EVENT_ID を更新）
+    sheet.getRange(targetRowIndex, COL.STATUS + 1).setValue(STATUS_RESERVED);
+    sheet.getRange(targetRowIndex, COL.EVENT_ID + 1).setValue(event.getId());
+
+    // ④ 通知（管理者）
+    pushAdminText_(
+      `【再予約（復活）】\n` +
+      `予約ID：${reservationId}\n` +
+      `日時：${Utilities.formatDate(start, TZ, "yyyy/MM/dd")} ${timeRange}\n` +
+      `お名前：${name}\n` +
+      `TEL：${tel}\n` +
+      (note ? `備考：${note}\n` : "") +
+      `userId：${userId}`
+    );
+
+    // ⑤ 通知（本人）
+    try {
+      const msg =
+        `【再予約完了】
+予約ID：${reservationId}
+日時：${Utilities.formatDate(start, TZ, "yyyy/MM/dd")} ${timeRange}
+
+※このメッセージが控えになります。`;
+      pushLineText_(userId, msg);
+    } catch (e) {
+      try { logLiff_("PUSH_FAIL", { where: "restoreReservation", reservationId, err: String(e) }); } catch { }
+    }
+
+    // ⑥ キャッシュ無効化
+    invalidateCaches_(userId, ymd, getIdsKey_());
+
+    return { ok: true, reservationId, eventId: event.getId() };
+
+  } catch (e) {
+    return { ok: false, message: "lock_or_internal_error" };
+  } finally {
+    try { lock.releaseLock(); } catch (e) { }
+  }
+}
+
+function handleCreateReservation_(body) {
+  debugLog('🟢 handleCreateReservation', { slotId: body.slotId });
+  const userId = String(body.userId || "").trim();
+  const name = String(body.name || "").trim();
+  const tel = String(body.tel || "").trim();
+  const note = String(body.note || "").trim();
+  const slotId = String(body.slotId || "").trim();
+
+  if (!userId) return { ok: false, message: "userId_required" };
+  if (!slotId) return { ok: false, message: "slotId_required" };
+  if (!name) return { ok: false, message: "name_required" };
+  if (!tel) return { ok: false, message: "tel_required" };
+
+  // slotId -> start/end
+  const parsed = parseSlotId_(slotId);
+  if (!parsed.ok) return parsed;
+
+  const { start, end, dateStr, timeLabel } = parsed;
+
+  // ★境界ズレ防止のため 1ms バッファ
+  const start2 = new Date(start.getTime() + 1);
+  const end2 = new Date(end.getTime() - 1);
+
+  // ★二重予約防止：ロック（slotId単位に寄せたいならDocumentLock + キーキャッシュでもOKだが、まずはScriptLockで堅牢に）
+  const lock = LockService.getScriptLock();
+  try {
+    lock.waitLock(10000); // 10秒まで待つ
+
+    // 1) 空きチェック（Freebusy）※ロック後に必ず再チェック
+    const busy = getBusySlots(start2, end2, { force: true });
+    if (busy.some(ev => start2 < ev.end && end2 > ev.start)) {
+      return { ok: false, message: "slot_already_reserved" };
+    }
+
+    // 2) 予約を書き込むカレンダー（メイン）
+    const cal = CalendarApp.getCalendarById(CALENDAR_ID);
+    if (!cal) return { ok: false, message: "calendar_not_found" };
+
+    // 3) 予約番号発行
+    const reservationId = generateReservationId_();
+
+    // 4) カレンダー登録
+    const title = `[予約 #${reservationId}] ${name}`;
+    const desc = [
+      `reservationId: ${reservationId}`,
+      `userId: ${userId}`,
+      `tel: ${tel}`,
+      note ? `note: ${note}` : ""
+    ].filter(Boolean).join("\n");
+
+    let event;
+    try {
+      event = cal.createEvent(title, start, end, { description: desc });
+    } catch (e) {
+      // カレンダー作成に失敗したら即エラー返す（ここでスプシには書かない）
+      return { ok: false, message: "calendar_create_failed" };
+    }
+
+    // 5) スプレッドシート書き込み
+    const sheet = SpreadsheetApp.openById(SHEET_ID).getSheetByName(SHEET_NAME);
+    if (!sheet) {
+      // スプシが無い等で書けない場合は、作ったイベントを巻き戻す（厳密）
+      try { event.deleteEvent(); } catch (e) { }
+      return { ok: false, message: "sheet_not_found" };
+    }
+
+    try {
+      sheet.appendRow([
+        reservationId,
+        userId,
+        dateStr,         // "yyyy/MM/dd"
+        timeLabel,       // "HH:mm〜HH:mm"
+        name,
+        "'" + tel,
+        note,
+        new Date(),
+        STATUS_RESERVED,
+        event.getId(), // ← 追加
+      ]);
+    } catch (e) {
+      // 書き込み失敗 → イベントも消して整合性を保つ（厳密）
+      try { event.deleteEvent(); } catch (e2) { }
+      return { ok: false, message: "sheet_write_failed" };
+    }
+
+    // ✅ 管理者にも通知（予約が“確定”してから送る）
+    pushAdminText_(
+      `【予約が入りました】\n` +
+      `予約ID：${reservationId}\n` +
+      `日時：${dateStr} ${timeLabel}\n` +
+      `お名前：${name}\n` +
+      `TEL：${tel}\n` +
+      (note ? `備考：${note}\n` : "") +
+      `userId：${userId}`
+    );
+
+    // ✅ ここで初めてPush（予約が確定してから）
+    try {
+      const msg =
+        `【ご予約確定】
+予約ID：${reservationId}
+日時：${dateStr} ${timeLabel}
+お名前：${name}
+
+※このメッセージが控えになります。`;
+      pushLineText_(userId, msg);
+    } catch (e) {
+      try { logLiff_("PUSH_FAIL", { where: "createReservation", reservationId, err: String(e) }); } catch { }
+    }
+
+    // 6) キャッシュ無効化（超大事）
+    invalidateCaches_(userId, dateStr, getIdsKey_()); // dateStr は yyyy/MM/dd でも toYmd_ で正規化される想定
+
+    // 7) ログ
+    try {
+      logLiff_("RESERVE_OK", { reservationId, slotId, userId });
+    } catch (e) { }
+
+    return {
+      ok: true,
+      reservationId,
+      slotId,
+      start: start.toISOString(),
+      end: end.toISOString(),
+      eventId: event.getId()
+    };
+
+  } catch (e) {
+    // ロック取得失敗や想定外
+    return { ok: false, message: "lock_or_internal_error" };
+  } finally {
+    try { lock.releaseLock(); } catch (e) { }
+  }
+}
+
+
+// ==========================
+// myReservations ← ★ここに追加
+// ==========================
+function handleMyReservations_(body) {
+  debugLog('🟢 handleMyReservations', {});
+  const userId = String(body.userId || "").trim();
+  const includeCanceled = !!body.includeCanceled;
+  if (!userId) return { ok: false, message: "userId_required" };
+
+  const cache = CacheService.getScriptCache();
+
+  const cacheKey = `myres:${userId}:${includeCanceled ? 1 : 0}`;
+  const cached = cache.get(cacheKey);
+  if (cached) return JSON.parse(cached);
+
+  const sheet = SpreadsheetApp.openById(SHEET_ID).getSheetByName(SHEET_NAME);
+  if (!sheet) return { ok: false, message: "sheet_not_found" };
+
+  const lastRow = sheet.getLastRow();
+  const lastCol = sheet.getLastColumn();
+  if (lastRow < 2) {
+    const empty = { ok: true, items: [] };
+    cache.put(cacheKey, JSON.stringify(empty), 60);
+    return empty;
+  }
+
+  // ✅ ヘッダ除外して必要範囲だけ
+  const values = sheet.getRange(2, 1, lastRow - 1, lastCol).getValues();
+  const items = [];
+
+  for (let i = 0; i < values.length; i++) {
+    const row = values[i];
+
+    if (String(row[COL.USER_ID]) !== userId) continue;
+
+    const status = row[COL.STATUS];
+    if (!includeCanceled && status === STATUS_CANCELED) continue;
+
+    const ymd = toYmd_(row[COL.DATE]); // Dateでも文字でも吸収
+
+    items.push({
+      reservationId: String(row[COL.RESERVATION_ID] || ""),
+      date: ymd, // ✅ 必ず "yyyy-MM-dd"
+      time: String(row[COL.TIME] || ""),
+      name: String(row[COL.NAME] || ""),
+      tel: String(row[COL.TEL] || ""),
+      note: String(row[COL.NOTE] || ""),
+      status: String(status || ""),
+    });
+  }
+
+  const result = { ok: true, items };
+
+  // ✅ 5分キャッシュ（一覧はこれで十分体感変わる）
+  cache.put(cacheKey, JSON.stringify(result), 5 * 60);
+
+  return result;
+}
+
+/**
+ * slotId: "YYYYMMDD_HH:mm〜HH:mm" を start/end に変換する
+ * - 枠の長さは固定ではなく、TIME_SLOTS_AM/PM の定義に従う
+ * - 例: "20260105_09:00〜11:00" / "20260105_13:30〜15:00"
+ */
+function parseSlotId_(slotId) {
+  const m = String(slotId || "").trim().match(/^(\d{8})_(.+)$/);
+  if (!m) return { ok: false, message: "slotId_invalid", slotId };
+
+  const ymd = m[1];
+  const timeRange = String(m[2] || "").trim(); // "09:00〜11:00"
+
+  const y = Number(ymd.slice(0, 4));
+  const mo = Number(ymd.slice(4, 6)) - 1;
+  const d = Number(ymd.slice(6, 8));
+
+  if (!timeRange.includes("〜")) return { ok: false, message: "time_invalid", slotId };
+
+  const [a, b] = timeRange.split("〜");
+  const [sh, sm] = String(a || "").split(":");
+  const [eh, em] = String(b || "").split(":");
+
+  const shN = parseInt(sh, 10), smN = parseInt(sm, 10);
+  const ehN = parseInt(eh, 10), emN = parseInt(em, 10);
+
+  if ([shN, smN, ehN, emN].some(n => Number.isNaN(n))) {
+    return { ok: false, message: "time_invalid", slotId };
+  }
+
+  const start = new Date(y, mo, d, shN, smN, 0);
+  const end = new Date(y, mo, d, ehN, emN, 0);
+
+  if (!(start instanceof Date) || isNaN(start.getTime())) return { ok: false, message: "date_invalid", slotId };
+  if (!(end instanceof Date) || isNaN(end.getTime())) return { ok: false, message: "date_invalid", slotId };
+  if (end <= start) return { ok: false, message: "time_invalid", slotId }; // 逆転/同一を弾く
+
+  const dateStr = Utilities.formatDate(start, "Asia/Tokyo", "yyyy/MM/dd");
+
+  return { ok: true, start, end, dateStr, timeLabel: timeRange };
+}
+
+function generateReservationId_() {
+  // 例: R20251229143012-123
+  const ts = Utilities.formatDate(new Date(), "Asia/Tokyo", "yyyyMMddHHmmss");
+  const rnd = Math.floor(Math.random() * 900) + 100;
+  return `R${ts}-${rnd}`;
+}
+
+function getLineChannelAccessToken_() {
+  return PropertiesService.getScriptProperties().getProperty("LINE_TOKEN") || "";
+}
+
+function pushLineText_(toUserId, text) {
+  const token = getLineChannelAccessToken_();
+  if (!token) throw new Error("LINE_TOKEN is missing");
+
+  const url = "https://api.line.me/v2/bot/message/push";
+  const payload = {
+    to: String(toUserId || "").trim(),
+    messages: [{ type: "text", text: String(text || "") }],
+  };
+
+  const res = UrlFetchApp.fetch(url, {
+    method: "post",
+    contentType: "application/json",
+    headers: { Authorization: "Bearer " + token },
+    payload: JSON.stringify(payload),
+    muteHttpExceptions: true,
+  });
+
+  const code = res.getResponseCode();
+  if (code !== 200) {
+    throw new Error("LINE push failed: " + code + " " + res.getContentText());
+  }
+}
+
+function pushAdminText_(text) {
+  if (!ADMIN_USER_ID) return;
+  if (!ADMIN_NOTIFY_IMMEDIATE) return; // ✅ スイッチ
+  pushLineText_(ADMIN_USER_ID, text);
+}
+
+
+// Temporary timing: no tokens, user IDs, names or reservation contents recorded.
+var __measureCtx_ = null;
+function measurePhase_(name, fn) {
+  const start = Date.now();
+  try { return fn(); }
+  finally { if (__measureCtx_) __measureCtx_.ms[name] = (__measureCtx_.ms[name] || 0) + Date.now() - start; }
+}
+function handleGetSlots_(body) {
+  return measurePhase_('slotsTotal', () => measuredSlotsOriginal_(body));
+}
+function handleApiRequest_(body) {
+  if (!body || body.action !== 'getSlots') return measuredApiOriginal_(body);
+  const start = Date.now();
+  __measureCtx_ = { version: 1, ym: /^\d{6}$/.test(String(body.ym || '')) ? String(body.ym) : '', slotsCache: 'not_checked', ms: {} };
+  try {
+    const result = measuredApiOriginal_(body);
+    const timing = __measureCtx_;
+    timing.ms.apiTotal = Date.now() - start;
+    timing.ms.slotsOther = Math.max(0, (timing.ms.slotsTotal || 0) - (timing.ms.holidays || 0) - (timing.ms.excludedDates || 0) - (timing.ms.busyCalendars || 0));
+    console.log('RESERVATION_TIMING ' + JSON.stringify(timing));
+    // Clone: do not add diagnostics to cached business data.
+    return Object.assign({}, result, { _timing: timing });
+  } finally { __measureCtx_ = null; }
+}
