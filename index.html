@@ -805,6 +805,21 @@
         font-size: 13px;
         margin-left: 0.5rem;
       }
+      .calendar-loading-notice {
+        display: flex; align-items: center; gap: 10px;
+        padding: 12px; margin-bottom: 12px; border-radius: 10px;
+        background: #eaf2ff; color: #184c91; font-size: 14px;
+      }
+      .calendar-loading-notice small { font-size: 12px; }
+      .calendar-loading-spinner {
+        flex: 0 0 18px; width: 18px; height: 18px;
+        border: 2px solid #bdd1ef; border-top-color: #3262cf;
+        border-radius: 50%; animation: spin .8s linear infinite;
+      }
+      .calendar-is-loading { opacity: .55; pointer-events: none; }
+      @media (prefers-reduced-motion: reduce) {
+        .calendar-loading-spinner { animation: none; }
+      }
     </style>
   </head>
 
@@ -837,6 +852,10 @@
           <div class="title">日付選択</div>
           <div class="subtitle">今日以降の予約可能日を選んでね</div>
 
+          <div id="calendarLoadingNotice" class="calendar-loading-notice hidden" role="status" aria-live="polite">
+            <span class="calendar-loading-spinner" aria-hidden="true"></span>
+            <div>空き枠を確認しています…<br /><small>取得後に日付を選べます。待っている間も「ご案内」や「予約一覧」を開けます。</small></div>
+          </div>
           <div id="calendar"></div>
 
           <!-- ✅ カレンダー下の案内（ここに追加） -->
@@ -1058,6 +1077,6 @@
       </div>
     </div>
 
-    <script src="./app.js?v=20261028-05"></script>
+    <script src="./app.js?v=20261028-06"></script>
   </body>
 </html>

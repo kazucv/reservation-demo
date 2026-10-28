@@ -1,5 +1,5 @@
-// Startup measurement v20261028-05. Times start at browser navigation, not the LINE tap.
-const startupMeasure_ = { version: '20261028-05', jsStart: performance.now(), ms: {}, completed: false };
+// Startup measurement v20261028-06. Times start at browser navigation, not the LINE tap.
+const startupMeasure_ = { version: '20261028-06', jsStart: performance.now(), ms: {}, completed: false };
 async function measureStartupPhase_(name, fn) {
   const start = performance.now();
   try { return await fn(); }
@@ -771,6 +771,21 @@ function buildAvailableDaysSet() {
 
 const slotsCacheSavedAt_ = new Map();
 
+// Keep the calendar inert while loading, while allowing navigation and reading.
+let calendarLoadingCount_ = 0;
+function setCalendarLoading_(loading) {
+  calendarLoadingCount_ = Math.max(0, calendarLoadingCount_ + (loading ? 1 : -1));
+  const busy = calendarLoadingCount_ > 0;
+  const calendar = document.getElementById('calendar');
+  const notice = document.getElementById('calendarLoadingNotice');
+  if (calendar) {
+    calendar.inert = busy;
+    calendar.setAttribute('aria-busy', String(busy));
+    calendar.classList.toggle('calendar-is-loading', busy);
+  }
+  if (notice) notice.classList.toggle('hidden', !busy);
+}
+
 function initFlatpickr() {
   if (!window.flatpickr) {
     log("flatpickr が読み込めてない…（CDN確認）");
@@ -800,8 +815,9 @@ function initFlatpickr() {
       selectedDate = toYmd(selectedDates[0] || today);
       const ym = toYmFromYmd(selectedDate);
 
+      setLoading(false);
       let initialSlotsReady = false;
-      setLoading(true, "空き枠を読み込み中...");
+      setCalendarLoading_(true);
       try {
         log("枠を取得中...");
 
@@ -818,7 +834,7 @@ function initFlatpickr() {
       } catch (e) {
         log(`ERROR: ${e?.message || e}`);
       } finally {
-        setLoading(false); // ✅ 絶対戻す
+        setCalendarLoading_(false); // Restore calendar input even on errors.
         if (initialSlotsReady) finishStartupMeasurement_();
       }
     },
@@ -828,7 +844,7 @@ function initFlatpickr() {
       const m = pad2(instance.currentMonth + 1);
       const ym = `${y}${m}`;
 
-      setLoading(true, "空き枠を読み込み中...");
+      setCalendarLoading_(true);
       try {
         log("枠を取得中...");
 
@@ -846,7 +862,7 @@ function initFlatpickr() {
       } catch (e) {
         log(`ERROR: ${e?.message || e}`);
       } finally {
-        setLoading(false); // ✅
+        setCalendarLoading_(false); // Restore calendar input even on errors.
       }
     },
 
@@ -857,7 +873,7 @@ function initFlatpickr() {
 
       const ym = toYmFromYmd(selectedDate);
 
-      setLoading(true, "空き枠を読み込み中...");
+      setCalendarLoading_(true);
       try {
         log("枠を取得中...");
         const slots = await fetchSlotsYm(ym);
@@ -866,12 +882,13 @@ function initFlatpickr() {
         if (!slots) return;
 
         fp.redraw();
+        if (!isViewVisible(viewCalendar)) return;
         renderSlotsForSelectedDate();
         showView("slots");
       } catch (e) {
         log(`ERROR: ${e?.message || e}`);
       } finally {
-        setLoading(false); // ✅
+        setCalendarLoading_(false); // Restore calendar input even on errors.
       }
     },
 
