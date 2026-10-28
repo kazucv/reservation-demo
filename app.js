@@ -10,8 +10,8 @@ document.getElementById('toggleTimingPanels')?.addEventListener('change', event 
   syncTimingPanels_();
 });
 
-// Startup measurement v20261028-15. Times start at browser navigation, not the LINE tap.
-const startupMeasure_ = { version: '20261028-15', jsStart: performance.now(), ms: {}, completed: false };
+// Startup measurement v20261028-16. Times start at browser navigation, not the LINE tap.
+const startupMeasure_ = { version: '20261028-16', jsStart: performance.now(), ms: {}, completed: false };
 async function measureStartupPhase_(name, fn) {
   const start = performance.now();
   try { return await fn(); }
@@ -526,6 +526,9 @@ function showDone(reserveResult) {
     <div style="margin-top:8px;" class="sub">予約ID: ${rid}</div>
     <div style="margin-top:8px;" class="sub">日付: ${escapeHtml(reserveResult?.start ? slotIdToYmd(reserveResult.slotId) : (selectedDate || ""))}</div>
     <div style="margin-top:4px;" class="sub">時間: ${startHm} 〜 ${endHm}</div>
+    ${reserveResult?.notifications?.user === 'failed'
+      ? '<p style="margin-top:12px;color:#9a3412;">予約は成立しています。LINE通知を送信できませんでした。予約内容は「予約一覧」で確認できます。</p>'
+      : ''}
   `;
 
   showView("done");

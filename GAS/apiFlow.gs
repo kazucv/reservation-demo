@@ -441,7 +441,7 @@ function handleCancelReservation_(body) {
 
     // 冪等：すでにキャンセル済み
     if (currentStatus === STATUS_CANCELED) {
-      invalidateCaches_(userId, ymd, getIdsKey_());
+      try { invalidateCaches_(userId, ymd, getIdsKey_()); } catch (e) { console.warn("Reservation saved; cache refresh failed"); }
       return { ok: true, reservationId, alreadyCanceled: true };
     }
 
@@ -469,14 +469,15 @@ function handleCancelReservation_(body) {
     // ✅ ステータス更新
     sheet.getRange(targetRowIndex, COL.STATUS + 1).setValue(STATUS_CANCELED);
 
-    pushAdminText_(
+    const notifications = {};
+    notifications.admin = sendReservationNotice_('cancel', reservationId, 'admin', ADMIN_USER_ID,
       `【キャンセル】\n` +
       `予約ID：${reservationId}\n` +
       `userId：${userId}`
     );
 
     // ✅ キャッシュ無効化
-    invalidateCaches_(userId, ymd, getIdsKey_());
+    try { invalidateCaches_(userId, ymd, getIdsKey_()); } catch (e) { console.warn("Reservation saved; cache refresh failed"); }
 
     try {
       const msg =
@@ -484,12 +485,12 @@ function handleCancelReservation_(body) {
 予約ID：${reservationId}
 
 またのご予約お待ちしてます。`;
-      pushLineText_(userId, msg);
+      notifications.user = sendReservationNotice_('cancel', reservationId, 'user', userId, msg);
     } catch (e) {
       try { logLiff_("PUSH_FAIL", { where: "cancelReservation", reservationId, err: String(e) }); } catch { }
     }
 
-    return { ok: true, reservationId };
+    return { ok: true, reservationId, notifications };
 
   } catch (e) {
     return { ok: false, message: "lock_or_internal_error" };
@@ -547,7 +548,7 @@ function handleRestoreReservation_(body) {
     // すでに予約中なら冪等でOK（復活済み）
     if (status === STATUS_RESERVED) {
       const ymd = toYmd_(dateStr);
-      invalidateCaches_(userId, ymd, getIdsKey_());
+      try { invalidateCaches_(userId, ymd, getIdsKey_()); } catch (e) { console.warn("Reservation saved; cache refresh failed"); }
       return { ok: true, reservationId, alreadyReserved: true };
     }
 
@@ -592,7 +593,8 @@ function handleRestoreReservation_(body) {
     sheet.getRange(targetRowIndex, COL.EVENT_ID + 1).setValue(event.getId());
 
     // ④ 通知（管理者）
-    pushAdminText_(
+    const notifications = {};
+    notifications.admin = sendReservationNotice_('restore', reservationId, 'admin', ADMIN_USER_ID,
       `【再予約（復活）】\n` +
       `予約ID：${reservationId}\n` +
       `日時：${Utilities.formatDate(start, TZ, "yyyy/MM/dd")} ${timeRange}\n` +
@@ -610,15 +612,15 @@ function handleRestoreReservation_(body) {
 日時：${Utilities.formatDate(start, TZ, "yyyy/MM/dd")} ${timeRange}
 
 ※このメッセージが控えになります。`;
-      pushLineText_(userId, msg);
+      notifications.user = sendReservationNotice_('restore', reservationId, 'user', userId, msg);
     } catch (e) {
       try { logLiff_("PUSH_FAIL", { where: "restoreReservation", reservationId, err: String(e) }); } catch { }
     }
 
     // ⑥ キャッシュ無効化
-    invalidateCaches_(userId, ymd, getIdsKey_());
+    try { invalidateCaches_(userId, ymd, getIdsKey_()); } catch (e) { console.warn("Reservation saved; cache refresh failed"); }
 
-    return { ok: true, reservationId, eventId: event.getId() };
+    return { ok: true, reservationId, eventId: event.getId(), notifications };
 
   } catch (e) {
     return { ok: false, message: "lock_or_internal_error" };
@@ -725,7 +727,8 @@ function handleCreateReservation_(body) {
     }
 
     // ✅ 管理者にも通知（予約が“確定”してから送る）
-    pushAdminText_(
+    const notifications = {};
+    notifications.admin = sendReservationNotice_('create', reservationId, 'admin', ADMIN_USER_ID,
       `【予約が入りました】\n` +
       `予約ID：${reservationId}\n` +
       `日時：${dateStr} ${timeLabel}\n` +
@@ -744,13 +747,13 @@ function handleCreateReservation_(body) {
 お名前：${name}
 
 ※このメッセージが控えになります。`;
-      pushLineText_(userId, msg);
+      notifications.user = sendReservationNotice_('create', reservationId, 'user', userId, msg);
     } catch (e) {
       try { logLiff_("PUSH_FAIL", { where: "createReservation", reservationId, err: String(e) }); } catch { }
     }
 
     // 6) キャッシュ無効化（超大事）
-    invalidateCaches_(userId, dateStr, getIdsKey_()); // dateStr は yyyy/MM/dd でも toYmd_ で正規化される想定
+    try { invalidateCaches_(userId, dateStr, getIdsKey_()); } catch (e) { console.warn("Reservation saved; cache refresh failed"); } // dateStr は yyyy/MM/dd でも toYmd_ で正規化される想定
 
     // 7) ログ
     try {
@@ -759,6 +762,7 @@ function handleCreateReservation_(body) {
 
     return {
       ok: true,
+      notifications,
       reservationId,
       slotId,
       start: start.toISOString(),
@@ -887,7 +891,9 @@ function pushLineText_(toUserId, text) {
 
   const code = res.getResponseCode();
   if (code !== 200) {
-    throw new Error("LINE push failed: " + code + " " + res.getContentText());
+    const error = new Error('LINE push failed');
+    error.lineStatus = code;
+    throw error;
   }
 }
 
@@ -1134,4 +1140,48 @@ function appendReservationTextRow_(sheet, values) {
   const range = `${name}!A${rowNumber}:K${rowNumber}`;
   SpreadsheetApp.flush();
   Sheets.Spreadsheets.Values.update({ majorDimension: 'ROWS', values: [strings] }, SHEET_ID, range, { valueInputOption: 'RAW' });
+}
+
+// Notification failures are separate from committed reservation data.
+function sendReservationNotice_(kind, reservationId, role, to, text) {
+  if (role === 'admin' && !ADMIN_NOTIFY_IMMEDIATE) return 'skipped';
+  try {
+    if (!String(to || '').trim()) {
+      const error = new Error('Recipient missing'); error.noticeReason = 'recipient_missing'; throw error;
+    }
+    if (role === 'user' && consumeDemoNotificationFailure_()) {
+      const error = new Error('Simulated notification failure'); error.noticeReason = 'demo_simulation'; throw error;
+    }
+    pushLineText_(to, text);
+    return 'sent';
+  } catch (error) {
+    const entry = { kind, reservationId, role, httpStatus: Number(error?.lineStatus) || 0,
+      reason: ['recipient_missing','demo_simulation'].includes(error?.noticeReason) ? error.noticeReason : 'delivery_error' };
+    // Do not log user IDs, token values, names, phone numbers or message contents.
+    console.error('RESERVATION_NOTIFICATION_FAILED ' + JSON.stringify(entry));
+    recordReservationNotificationFailure_(entry);
+    return 'failed';
+  }
+}
+function recordReservationNotificationFailure_(entry) {
+  try {
+    const book = SpreadsheetApp.openById(LOG_SHEET_ID);
+    let sheet = book.getSheetByName('通知エラー');
+    if (!sheet) {
+      sheet = book.insertSheet('通知エラー');
+      sheet.appendRow(['記録日時', '操作種別', '予約ID', '通知先区分', 'HTTPステータス', '理由']);
+    }
+    sheet.appendRow([Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy/MM/dd HH:mm:ss'),
+      entry.kind, entry.reservationId, entry.role, entry.httpStatus || '', entry.reason]);
+  } catch (e) { console.error('RESERVATION_NOTIFICATION_ERROR_LOG_UNAVAILABLE'); }
+}
+function consumeDemoNotificationFailure_() {
+  if (SHEET_ID !== '15JK9k0MkUVjq1znn6GHi8E3L-zyi6H-8MxsfxVCq3xQ' ||
+      CALENDAR_ID !== 'b57dcd69b7d8e60267488712be9345f9702c8dafd7bcfc563d9d03f538104b8d@group.calendar.google.com') return false;
+  const props = PropertiesService.getScriptProperties();
+  const raw = props.getProperty('DEMO_NOTICE_FAILURE_ONCE');
+  if (!raw) return false;
+  props.deleteProperty('DEMO_NOTICE_FAILURE_ONCE');
+  const expiresAt = Number(raw);
+  return Number.isFinite(expiresAt) && Date.now() < expiresAt;
 }
