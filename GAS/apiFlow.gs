@@ -67,7 +67,7 @@ function invalidateCaches_(userId, ymd, idsKey) {
   ]);
 
   const fixedIdsKey = idsKey || getIdsKey_();
-  for (const ym of ymSet) cache.remove(`slots:v3:${ym}:${fixedIdsKey}`);
+  for (const ym of ymSet) cache.remove(`slots:v4:${ym}:${fixedIdsKey}`);
 
   // ✅ 日busyキャッシュ（utils.gs 側）
   const ymdCompact = ymdFixed.replaceAll("-", "");
@@ -104,7 +104,7 @@ function measuredSlotsOriginal_(body) {
   const idsKey = getIdsKey_();
 
   const cache = CacheService.getScriptCache();
-  const cacheKey = `slots:v3:${ym}:${idsKey}`;
+  const cacheKey = `slots:v4:${ym}:${idsKey}`;
 
   const force = (body && (
     body.force === true ||
@@ -912,39 +912,60 @@ function handleApiRequest_(body) {
 }
 
 // Display-only business data cache (3 minutes). Reservation mutation paths are unchanged.
+// Display-only caches: raw holidays 6 hours, business exceptions 3 minutes.
+// Reservation mutation paths and forced live busy checks are unchanged.
 function getCachedBusinessDays_(year, month, force) {
+  const y = Number(year), m = Number(month);
+  if (!Number.isInteger(y) || y < 1000 || y > 9998 || !Number.isInteger(m) || m < 1 || m > 12) {
+    throw new Error('Invalid business calendar month');
+  }
   const cache = CacheService.getScriptCache();
-  // Includes source IDs so changing the demo's data source cannot reuse another source.
-  const source = [SHEET_ID, EXCLUDED_SHEET_NAME, JP_HOLIDAY_CALENDAR_ID].join('|');
-  const digest = measurePhase_('businessKey', () => Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, source));
-  const signature = digest.map(b => ('0' + (b & 255).toString(16)).slice(-2)).join('').slice(0, 24);
-  const key = `business:v1:${year}:${month}:${signature}`;
-  if (!force) {
-    const raw = measurePhase_('businessCacheRead', () => cache.get(key));
-    if (raw) {
-      let entry;
-      try { entry = JSON.parse(raw); } catch (e) { entry = null; }
-      const age = entry ? Date.now() - entry.savedAt : Infinity;
-      if (entry && Array.isArray(entry.holidays) && Array.isArray(entry.excluded) && age >= 0 && age < 180000) {
-        if (__measureCtx_) __measureCtx_.businessCache = 'hit';
-        return entry;
+  function keyFor_(source) {
+    const digest = measurePhase_('businessKey', () => Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, source));
+    return digest.map(b => ('0' + (b & 255).toString(16)).slice(-2)).join('').slice(0, 24);
+  }
+  function readThrough_(key, ttl, phase, flag, loader) {
+    if (!force) {
+      const raw = measurePhase_('businessCacheRead', () => cache.get(key));
+      if (raw) {
+        let entry;
+        try { entry = JSON.parse(raw); } catch (e) { entry = null; }
+        const age = entry ? Date.now() - entry.savedAt : Infinity;
+        if (entry && Array.isArray(entry.value) && age >= 0 && age < ttl * 1000) {
+          if (__measureCtx_) __measureCtx_[flag] = 'hit';
+          return entry.value;
+        }
       }
     }
+    if (__measureCtx_) __measureCtx_[flag] = force ? 'bypass' : 'miss';
+    const value = measurePhase_(phase, loader);
+    measurePhase_('businessCacheWrite', () => cache.put(key, JSON.stringify({ savedAt: Date.now(), value }), ttl));
+    return value;
   }
-  if (__measureCtx_) __measureCtx_.businessCache = force ? 'bypass' : 'miss';
-  // Same normalization and filtering as the existing helpers, but let read failures throw:
-  // do not persist an empty business calendar when the source cannot be read.
-  const holidays = measurePhase_('holidays', () =>
-    (getHolidays(year, month) || []).map(toYmd_).filter(Boolean));
-  const excluded = measurePhase_('excludedDates', () => {
+  const monthKey = `${y}-${String(m).padStart(2, '0')}`;
+  const holidayKey = `rawHolidays:v1:${monthKey}:${keyFor_(JP_HOLIDAY_CALENDAR_ID)}`;
+  const rawHolidays = readThrough_(holidayKey, 21600, 'holidays', 'holidayCache', () => {
+    const cal = CalendarApp.getCalendarById(JP_HOLIDAY_CALENDAR_ID);
+    if (!cal) throw new Error('Holiday calendar not found');
+    const start = new Date(`${monthKey}-01T00:00:00+09:00`);
+    const nextYear = m === 12 ? y + 1 : y;
+    const nextMonth = m === 12 ? 1 : m + 1;
+    const end = new Date(`${nextYear}-${String(nextMonth).padStart(2, '0')}-01T00:00:00+09:00`);
+    return [...new Set(cal.getEvents(start, end)
+      .map(event => Utilities.formatDate(event.getStartTime(), 'Asia/Tokyo', 'yyyy-MM-dd'))
+      .filter(ymd => ymd.startsWith(monthKey + '-')))];
+  });
+  const exceptionsKey = `businessExceptions:v2:${keyFor_([SHEET_ID, EXCLUDED_SHEET_NAME, EXCLUDE_STATUS_CLOSED, EXCLUDE_STATUS_OPEN].join('|'))}`;
+  const exceptions = readThrough_(exceptionsKey, 180, 'excludedDates', 'exceptionsCache', () => {
     const sheet = SpreadsheetApp.openById(SHEET_ID).getSheetByName(EXCLUDED_SHEET_NAME);
     if (!sheet) throw new Error('Business settings sheet not found');
     return sheet.getDataRange().getValues()
-      .filter(row => row[0] instanceof Date &&
+      .filter(row => row[0] instanceof Date && !isNaN(row[0].getTime()) &&
         (row[1] === EXCLUDE_STATUS_CLOSED || row[1] === EXCLUDE_STATUS_OPEN))
-      .map(row => toYmd_(row[0])).filter(Boolean);
+      .map(row => ({ ymd: toYmd_(row[0]), open: row[1] === EXCLUDE_STATUS_OPEN }));
   });
-  const entry = { savedAt: Date.now(), holidays, excluded };
-  measurePhase_('businessCacheWrite', () => cache.put(key, JSON.stringify(entry), 180));
-  return entry;
+  const overrides = new Set(exceptions.filter(x => x.open).map(x => x.ymd));
+  const excluded = [...new Set(exceptions.filter(x => !x.open).map(x => x.ymd))];
+  if (__measureCtx_) __measureCtx_.businessCache = 'split';
+  return { holidays: rawHolidays.filter(ymd => !overrides.has(ymd)), excluded };
 }

@@ -1,5 +1,5 @@
-// Startup measurement v20261028-04. Times start at browser navigation, not the LINE tap.
-const startupMeasure_ = { version: '20261028-04', jsStart: performance.now(), ms: {}, completed: false };
+// Startup measurement v20261028-05. Times start at browser navigation, not the LINE tap.
+const startupMeasure_ = { version: '20261028-05', jsStart: performance.now(), ms: {}, completed: false };
 async function measureStartupPhase_(name, fn) {
   const start = performance.now();
   try { return await fn(); }
@@ -1864,7 +1864,7 @@ const reservationTimingRows_ = [];
 function showReservationTiming_(ym, elapsed, server, outcome) {
   const ms = server?.ms || {};
   const sec = value => Number.isFinite(value) ? (value / 1000).toFixed(2) + '秒' : '未取得';
-  const text = `${ym} / ${outcome} / 計測版:${server?.version || '旧版'} / 月:${server?.slotsCache || '不明'} / 営業設定:${server?.businessCache || '処理なし'}\n通信全体:${sec(elapsed)}　API内部:${sec(ms.apiTotal)}\nAPI外の差分:${sec(Number.isFinite(ms.apiTotal) ? Math.max(0, elapsed - ms.apiTotal) : undefined)}\n本人確認:${sec(ms.authentication)}　APIその他:${sec(ms.apiOther)}\n月キャッシュ読込:${sec(ms.monthCacheRead)}　保存:${sec(ms.monthCacheWrite)}\n営業設定全体:${sec(ms.businessTotal)}\n  キー生成:${sec(ms.businessKey)}　読込:${sec(ms.businessCacheRead)}　保存:${sec(ms.businessCacheWrite)}\n  祝日:${sec(ms.holidays)}　除外日:${sec(ms.excludedDates)}\n予定取得:${sec(ms.busyCalendars)}　空き枠計算:${sec(ms.slotsCompute)}\n空き枠その他:${sec(ms.slotsOther)}\n※営業設定の各内訳は「営業設定全体」に含まれます。`;
+  const text = `${ym} / ${outcome} / 計測版:${server?.version || '旧版'} / 月:${server?.slotsCache || '不明'} / 祝日:${server?.holidayCache || '処理なし'} / 営業:${server?.exceptionsCache || '処理なし'}\n通信全体:${sec(elapsed)}　API内部:${sec(ms.apiTotal)}\nAPI外の差分:${sec(Number.isFinite(ms.apiTotal) ? Math.max(0, elapsed - ms.apiTotal) : undefined)}\n本人確認:${sec(ms.authentication)}　APIその他:${sec(ms.apiOther)}\n月キャッシュ読込:${sec(ms.monthCacheRead)}　保存:${sec(ms.monthCacheWrite)}\n営業設定全体:${sec(ms.businessTotal)}\n  キー生成:${sec(ms.businessKey)}　読込:${sec(ms.businessCacheRead)}　保存:${sec(ms.businessCacheWrite)}\n  祝日:${sec(ms.holidays)}　除外日:${sec(ms.excludedDates)}\n予定取得:${sec(ms.busyCalendars)}　空き枠計算:${sec(ms.slotsCompute)}\n空き枠その他:${sec(ms.slotsOther)}\n※営業設定の各内訳は「営業設定全体」に含まれます。`;
   reservationTimingRows_.push(text);
   if (reservationTimingRows_.length > 8) reservationTimingRows_.shift();
   console.info('RESERVATION_TIMING', { ym, elapsedMs: Math.round(elapsed), outcome, server });
