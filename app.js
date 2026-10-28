@@ -1,5 +1,5 @@
-// Startup measurement v20261028-06. Times start at browser navigation, not the LINE tap.
-const startupMeasure_ = { version: '20261028-06', jsStart: performance.now(), ms: {}, completed: false };
+// Startup measurement v20261028-07. Times start at browser navigation, not the LINE tap.
+const startupMeasure_ = { version: '20261028-07', jsStart: performance.now(), ms: {}, completed: false };
 async function measureStartupPhase_(name, fn) {
   const start = performance.now();
   try { return await fn(); }
@@ -25,7 +25,7 @@ function finishStartupMeasurement_() {
       summary.textContent = '起動計測 v' + startupMeasure_.version;
       const pre = document.createElement('pre');
       pre.style.cssText = 'white-space:pre-wrap;font:inherit;user-select:text;';
-      pre.textContent = `ページ読込開始→操作可能:${sec(ms.navigationToReady)}\n画面コード開始まで:${sec(startupMeasure_.jsStart)}\nLIFF初期化:${sec(ms.liffInit)}\nプロフィール取得:${sec(ms.profile)}\n初月の空き枠取得:${sec(ms.initialSlots)}\n描画待ちの目安:${sec(ms.renderOpportunity)}\n※LINEでタップしてからページ読込開始までの時間は含みません。`;
+      pre.textContent = `ページ読込開始→初月の空き情報準備完了:${sec(ms.navigationToReady)}\n画面コード開始まで:${sec(startupMeasure_.jsStart)}\nLIFF初期化:${sec(ms.liffInit)}\nプロフィール取得:${sec(ms.profile)}\n初月の空き枠取得:${sec(ms.initialSlots)}\n描画待ちの目安:${sec(ms.renderOpportunity)}\n※LINEでタップしてからページ読込開始までの時間は含みません。`;
       panel.append(summary, pre);
       document.getElementById('calendar')?.insertAdjacentElement('afterend', panel);
       console.info('STARTUP_TIMING', { version: startupMeasure_.version, jsStart: startupMeasure_.jsStart, ms: { ...ms } });
@@ -103,6 +103,7 @@ let fp = null;
 
 // ym -> slots[]
 const slotsCache = new Map();
+const slotsGenerationByMonth_ = new Map();
 const slotsInFlight = new Map(); // ✅ 取得中Promiseを共有する
 let slotsReqSeq = 0; // ✅ 月の空き取得の「世代番号」
 
@@ -449,7 +450,9 @@ function setActiveTab(key) {
   tabSettings?.classList.toggle("is-active", key === "settings");
 }
 
+let viewEpoch_ = 0;
 function showView(name) {
+  ++viewEpoch_;
   const views = [
     viewCalendar,
     viewSlots,
@@ -710,7 +713,8 @@ async function fetchSlotsYm(ym, opts = {}) {
     invalidateAvailableDaysSet();
   }
 
-  const mySeq = ++slotsReqSeq;
+  const monthGeneration = (slotsGenerationByMonth_.get(ym) || 0) + 1;
+  slotsGenerationByMonth_.set(ym, monthGeneration);
 
   const payload = {
     action: "getSlots",
@@ -722,7 +726,7 @@ async function fetchSlotsYm(ym, opts = {}) {
     const { data, aborted } = await postJson(GAS_URL, payload, 25000);
 
     if (aborted) return null;
-    if (mySeq !== slotsReqSeq) return null;
+    if (monthGeneration !== slotsGenerationByMonth_.get(ym)) return null;
 
     if (!data?.ok || !Array.isArray(data.slots)) {
       throw new Error(`getSlots NG: ${JSON.stringify(data)}`);
@@ -739,7 +743,7 @@ async function fetchSlotsYm(ym, opts = {}) {
   try {
     return await p;
   } finally {
-    slotsInFlight.delete(ym);
+    if (slotsInFlight.get(ym) === p) slotsInFlight.delete(ym);
   }
 }
 
@@ -779,9 +783,9 @@ function setCalendarLoading_(loading) {
   const calendar = document.getElementById('calendar');
   const notice = document.getElementById('calendarLoadingNotice');
   if (calendar) {
-    calendar.inert = busy;
+    calendar.inert = false;
     calendar.setAttribute('aria-busy', String(busy));
-    calendar.classList.toggle('calendar-is-loading', busy);
+    calendar.classList.remove('calendar-is-loading');
   }
   if (notice) notice.classList.toggle('hidden', !busy);
 }
@@ -852,7 +856,7 @@ function initFlatpickr() {
         if (slots === null) return;
 
         if (slots.length === 0) {
-          log("この月は空きがないみたい");
+          if (isViewVisible(viewCalendar)) log("この月は空きがないみたい");
           fp.redraw();
           return;
         }
@@ -869,26 +873,39 @@ function initFlatpickr() {
     onChange: async (selectedDates) => {
       const d = selectedDates[0];
       if (!d) return;
-      selectedDate = toYmd(d);
-
-      const ym = toYmFromYmd(selectedDate);
-
+      const requestedDate = toYmd(d);
+      selectedDate = requestedDate;
+      selectedSlot = null;
+      const ym = toYmFromYmd(requestedDate);
+      clearSlotsUI();
+      if (slotCount) slotCount.textContent = fmtYmdJaWithDow(requestedDate);
+      if (slotsAM) slotsAM.textContent = '空き時間を確認しています…';
+      if (slotsPM) slotsPM.textContent = '空き時間を確認しています…';
+      showView('slots');
+      const epoch = viewEpoch_;
+      const isCurrent = () => epoch === viewEpoch_ && selectedDate === requestedDate && isViewVisible(viewSlots);
+      log('選んだ日の空き時間を確認しています…');
       setCalendarLoading_(true);
       try {
-        log("枠を取得中...");
+        // Reuse the month request already running; do not add a day API call.
         const slots = await fetchSlotsYm(ym);
-
-        // aborted/古いレスポンスなら画面遷移しない
-        if (!slots) return;
-
-        fp.redraw();
-        if (!isViewVisible(viewCalendar)) return;
+        if (!isCurrent()) return;
+        if (slots === null) throw new Error('取得できませんでした。日付選択へ戻って、もう一度お試しください。');
+        fp?.redraw?.();
         renderSlotsForSelectedDate();
-        showView("slots");
+        if (getSlotsForDate(requestedDate).length === 0) {
+          log('この日に予約できる時間はありません。別の日付を選んでください。');
+        }
       } catch (e) {
-        log(`ERROR: ${e?.message || e}`);
+        if (isCurrent()) {
+          clearSlotsUI();
+          if (slotsAM) slotsAM.textContent = '取得できませんでした';
+          if (slotsPM) slotsPM.textContent = '日付選択へ戻って、もう一度お試しください';
+          log('空き時間を取得できませんでした。日付選択へ戻ってお試しください。');
+        }
+        console.error(e);
       } finally {
-        setCalendarLoading_(false); // Restore calendar input even on errors.
+        setCalendarLoading_(false);
       }
     },
 
