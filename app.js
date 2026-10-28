@@ -1,3 +1,38 @@
+// Startup measurement v20261028-03. Times start at browser navigation, not the LINE tap.
+const startupMeasure_ = { version: '20261028-03', jsStart: performance.now(), ms: {}, completed: false };
+async function measureStartupPhase_(name, fn) {
+  const start = performance.now();
+  try { return await fn(); }
+  finally { startupMeasure_.ms[name] = performance.now() - start; }
+}
+function finishStartupMeasurement_() {
+  if (startupMeasure_.completed) return;
+  startupMeasure_.completed = true;
+  const uiReadyAt = performance.now();
+  startupMeasure_.ms.navigationToReady = uiReadyAt;
+  startupMeasure_.ms.javascriptToReady = uiReadyAt - startupMeasure_.jsStart;
+  // Two animation frames approximate a paint opportunity; this is not proof of screen presentation.
+  requestAnimationFrame(() => requestAnimationFrame(() => {
+    try {
+      startupMeasure_.ms.renderOpportunity = performance.now() - uiReadyAt;
+      const sec = x => Number.isFinite(x) ? (x / 1000).toFixed(2) + '秒' : '未取得';
+      const ms = startupMeasure_.ms;
+      const panel = document.createElement('details');
+      panel.id = 'startupTimingPanel';
+      panel.open = true;
+      panel.style.cssText = 'margin:12px 0;padding:10px;background:#edf5ff;border:1px solid #b1cbed;border-radius:8px;font-size:12px;';
+      const summary = document.createElement('summary');
+      summary.textContent = '起動計測 v' + startupMeasure_.version;
+      const pre = document.createElement('pre');
+      pre.style.cssText = 'white-space:pre-wrap;font:inherit;user-select:text;';
+      pre.textContent = `ページ読込開始→操作可能:${sec(ms.navigationToReady)}\n画面コード開始まで:${sec(startupMeasure_.jsStart)}\nLIFF初期化:${sec(ms.liffInit)}\nプロフィール取得:${sec(ms.profile)}\n初月の空き枠取得:${sec(ms.initialSlots)}\n描画待ちの目安:${sec(ms.renderOpportunity)}\n※LINEでタップしてからページ読込開始までの時間は含みません。`;
+      panel.append(summary, pre);
+      document.getElementById('calendar')?.insertAdjacentElement('afterend', panel);
+      console.info('STARTUP_TIMING', { version: startupMeasure_.version, jsStart: startupMeasure_.jsStart, ms: { ...ms } });
+    } catch (e) { console.warn('Startup measurement display unavailable'); }
+  }));
+}
+
 console.log("✅ app.js loaded", new Date().toISOString());
 
 // ====== CONFIG ======
@@ -765,11 +800,12 @@ function initFlatpickr() {
       selectedDate = toYmd(selectedDates[0] || today);
       const ym = toYmFromYmd(selectedDate);
 
+      let initialSlotsReady = false;
       setLoading(true, "空き枠を読み込み中...");
       try {
         log("枠を取得中...");
 
-        const slots = await fetchSlotsYm(ym);
+        const slots = await measureStartupPhase_('initialSlots', () => fetchSlotsYm(ym));
 
         if (slots === null) {
           log("通信が不安定みたい。もう一度試してね");
@@ -777,11 +813,13 @@ function initFlatpickr() {
         }
 
         fp.redraw();
+        initialSlotsReady = true;
         if (isViewVisible(viewCalendar)) log("日付を選んでね");
       } catch (e) {
         log(`ERROR: ${e?.message || e}`);
       } finally {
         setLoading(false); // ✅ 絶対戻す
+        if (initialSlotsReady) finishStartupMeasurement_();
       }
     },
 
@@ -1542,7 +1580,7 @@ async function run() {
 
   try {
     log("1) init LIFF...");
-    await liff.init({ liffId: LIFF_ID });
+    await measureStartupPhase_('liffInit', () => liff.init({ liffId: LIFF_ID }));
 
     if (!liff.isLoggedIn()) {
       log("2) login...");
@@ -1551,7 +1589,7 @@ async function run() {
     }
 
     log("3) getting profile...");
-    profile = await liff.getProfile();
+    profile = await measureStartupPhase_('profile', () => liff.getProfile());
 
     if (headerGreeting) {
       headerGreeting.textContent = `こんにちは ${profile.displayName} さん`;
