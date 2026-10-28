@@ -1,18 +1,15 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="ja">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width,initial-scale=1" />
-    <title>KID ACADEMY＋ Reserve</title>
+    <title>予約システム｜体験デモ</title>
 
     <!-- LIFF -->
     <script src="https://static.line-scdn.net/liff/edge/2/sdk.js"></script>
 
     <!-- flatpickr (inline calendar) -->
-    <link
-      rel="stylesheet"
-      href="https://cdn.jsdelivr.net/npm/flatpickr@4.6.13/dist/flatpickr.min.css"
-    />
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/flatpickr@4.6.13/dist/flatpickr.min.css" />
     <script src="https://cdn.jsdelivr.net/npm/flatpickr@4.6.13/dist/flatpickr.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/flatpickr@4.6.13/dist/l10n/ja.js"></script>
     <script src="https://unpkg.com/@phosphor-icons/web"></script>
@@ -40,7 +37,11 @@
         background: var(--bg);
         margin: 0;
         color: var(--text);
-        font-family: system-ui, -apple-system, "Hiragino Sans", sans-serif;
+        font-family:
+          system-ui,
+          -apple-system,
+          "Hiragino Sans",
+          sans-serif;
         -webkit-font-smoothing: antialiased;
         padding-bottom: 0px;
         overflow: hidden;
@@ -729,7 +730,9 @@
       .tab,
       .danger-btn,
       .ghost-btn {
-        transition: transform 0.06s ease, background 0.12s ease,
+        transition:
+          transform 0.06s ease,
+          background 0.12s ease,
           opacity 0.12s ease;
       }
       .back:active,
@@ -817,8 +820,8 @@
       <header class="header">
         <div class="header-inner">
           <div class="brand">
-            <div class="sub">KID ACADEMY＋ 高岡駅南校</div>
-            <div class="cap">ご利用者さま専用 予約アプリ</div>
+            <div class="sub">予約システム｜体験デモ</div>
+            <div class="cap">日時選択からキャンセルまで体験できます</div>
           </div>
           <div class="logo" id="headerGreeting">こんにちは</div>
         </div>
@@ -837,66 +840,37 @@
           <div id="calendar"></div>
 
           <!-- ✅ カレンダー下の案内（ここに追加） -->
-          <section class="calendar-note" aria-label="予約に関するご案内">
-            <h2 class="calendar-note__title">ご予約について</h2>
+          <section class="calendar-note" aria-label="デモのご案内">
+            <h2 class="calendar-note__title">体験デモについて</h2>
 
             <ul class="calendar-note__list">
-              <li>ご予約はカレンダーから空いている時間枠を選択して行います</li>
-              <li>
-                所要時間は内容によって異なります
-                <span class="calendar-note__sub">
-                  ※詳細は当日のご案内や事前連絡をご確認ください
-                </span>
-              </li>
-              <li>開始時刻の目安：予約時間を目安にお越しください</li>
+              <li>実際の来店予約は行われません。</li>
+              <li>氏名・電話番号・備考には、実際の個人情報を入力しないでください。</li>
+              <li>日時の選択、予約の登録、予約一覧の確認、キャンセルを体験できます。</li>
             </ul>
 
-            <h3 class="calendar-note__subtitle">ご利用にあたってのお願い</h3>
+            <h3 class="calendar-note__subtitle">お試し用の入力例</h3>
             <ul class="calendar-note__list">
-              <li>
-                遅れる場合や、来所が難しくなった場合は、分かった時点でご連絡ください
-              </li>
-              <li>
-                予約の変更はいったんキャンセル後、空き枠から再度ご予約ください
-              </li>
-              <li>
-                状況により、開始時間や内容を調整させていただく場合があります
-              </li>
+              <li>お名前：デモテスト</li>
+              <li>電話番号：09000000000</li>
+              <li>備考：動作確認</li>
             </ul>
 
-            <h3 class="calendar-note__subtitle">よくあるご質問</h3>
-            <dl class="calendar-note__faq">
-              <div class="calendar-note__qa">
-                <dt>Q. 当日のキャンセルはどうすればいいですか？</dt>
-                <dd>
-                  A. 当日のキャンセルは、お電話にてご連絡をお願いします。
-                  <span class="calendar-note__sub">
-                    ※前日までのキャンセルは、予約一覧から操作できます
-                  </span>
-                </dd>
-              </div>
+            <h3 class="calendar-note__subtitle">予約の確認・キャンセル</h3>
+            <ul class="calendar-note__list">
+              <li>画面下の「予約一覧」から操作できます。</li>
+              <li>予約やキャンセルが完了すると、友だち追加したデモ用公式アカウントからLINE通知が届きます。</li>
+            </ul>
 
-              <div class="calendar-note__qa">
-                <dt>Q. 予約内容はどこで確認できますか？</dt>
-                <dd>A. 「予約一覧」からご自身の予約を確認できます。</dd>
-              </div>
-
-              <div class="calendar-note__qa">
-                <dt>Q. キャンセルしたい場合はどうすればいいですか？</dt>
-                <dd>A. 予約一覧からキャンセルできます。</dd>
-              </div>
-            </dl>
-
-            <p class="calendar-note__hint">
-              ※予約状況はリアルタイムで更新されます
-            </p>
+            <p class="calendar-note__hint">※最新の予約状況は、画面を更新してご確認ください。</p>
           </section>
         </section>
 
         <section id="viewSlots" class="view hidden">
           <div class="topbar">
             <button id="backToCalendar" class="back">
-              <i class="ph ph-caret-left"></i>日付選択にもどる
+              <i class="ph ph-caret-left"></i>
+              日付選択にもどる
             </button>
           </div>
 
@@ -917,7 +891,8 @@
         <section id="viewForm" class="view hidden">
           <div class="topbar">
             <button id="backToSlots" class="back">
-              <i class="ph ph-caret-left"></i>空き時間にもどる
+              <i class="ph ph-caret-left"></i>
+              空き時間にもどる
             </button>
           </div>
 
@@ -925,17 +900,13 @@
 
           <div class="card" id="summary"></div>
 
-          <div class="label">お客様情報</div>
-          <input id="name" placeholder="お名前" autocomplete="name" />
-          <input
-            id="tel"
-            placeholder="電話番号"
-            inputmode="numeric"
-            autocomplete="tel"
-          />
+          <div class="label">お試し用の情報</div>
+          <div class="hint">体験デモです。実際の来店予約は行われません。氏名・電話番号・備考には、実際の個人情報を入力しないでください。</div>
+          <input id="name" placeholder="例：デモテスト" autocomplete="off" />
+          <input id="tel" placeholder="例：09000000000" inputmode="numeric" autocomplete="off" />
 
           <div class="label">メモ</div>
-          <textarea id="note" placeholder="備考（任意）"></textarea>
+          <textarea id="note" placeholder="例：動作確認（任意）"></textarea>
 
           <button id="confirmBtn" class="primary">内容を確認する</button>
           <div class="hint">お名前と電話番号は必須です</div>
@@ -944,7 +915,8 @@
         <section id="viewConfirm" class="view hidden">
           <div class="topbar">
             <button id="confirmBackBtn" class="back">
-              <i class="ph ph-caret-left"></i>もどって修正
+              <i class="ph ph-caret-left"></i>
+              もどって修正
             </button>
           </div>
 
@@ -953,10 +925,8 @@
 
           <div class="card" id="confirmSummary"></div>
 
-          <button id="confirmSubmitBtn" class="primary">
-            この内容で予約する
-          </button>
-          <div class="hint">この内容で予約を確定します</div>
+          <button id="confirmSubmitBtn" class="primary">この内容で予約する</button>
+          <div class="hint">デモ用の予約データを登録します。実際の来店予約は行われません。</div>
         </section>
 
         <section id="viewDone" class="view hidden">
@@ -965,9 +935,7 @@
 
           <div class="done-actions">
             <button id="doneToCalendar" class="ghost">別日を予約する</button>
-            <button id="doneToSlots" class="ghost">
-              同じ日の空き時間を見る
-            </button>
+            <button id="doneToSlots" class="ghost">同じ日の空き時間を見る</button>
           </div>
         </section>
 
@@ -981,24 +949,23 @@
             <dl class="list-note__faq">
               <div class="list-note__qa">
                 <dt>Q. 予約内容はどこで確認できますか？</dt>
-                <dd>
-                  A. このページの「予約一覧」からご自身の予約を確認できます。
-                </dd>
+                <dd>A. このページの「予約一覧」からご自身の予約を確認できます。</dd>
               </div>
 
               <div class="list-note__qa">
                 <dt>Q. キャンセルしたい場合はどうすればいいですか？</dt>
-                <dd>A. 前日までのキャンセルは、予約一覧から操作できます。</dd>
+                <dd>A. キャンセルボタンが表示されている予約は、この一覧からキャンセルできます。</dd>
               </div>
 
               <div class="list-note__qa">
-                <dt>Q. 当日のキャンセルはどうすればいいですか？</dt>
-                <dd>A. 当日のキャンセルは、お電話にてご連絡をお願いします。</dd>
+                <dt>Q. キャンセルした予約を、もう一度試せますか？</dt>
+                <dd>A. 「もう一度予約する」ボタンが表示されていれば操作できます。空き状況によっては予約できない場合があります。</dd>
               </div>
             </dl>
 
             <p class="list-note__hint">
-              ※予約状況はリアルタイムで更新されます。<br />
+              ※最新の予約状況は、画面を更新してご確認ください。
+              <br />
               表示が古い場合は、画面を下に引っ張って更新してください。
             </p>
           </section>
@@ -1008,43 +975,35 @@
           <div class="title">ご案内</div>
           <div class="card">
             <div class="item">
-              <h3 class="setting__title">お問い合わせ</h3>
-              <p>
-                お急ぎの方：<a href="tel:0766-30-3244">0766-30-3244</a>
-                受付時間：平日 10:00〜18:00
-              </p>
-              <address>
-                〒933-0871<br />
-                富山県高岡市駅南2-3-5 西側１階
-              </address>
+              <h3 class="setting__title">このデモについて</h3>
+              <p>LINEから日時を選び、予約の登録・確認・キャンセルまでを体験できる予約システムです。実際の来店予約は行われません。</p>
             </div>
 
             <div class="item">
-              <h3 class="setting__title">キャンセルについて</h3>
-              <p>キャンセルは「予約一覧」から行えます。</p>
+              <h3 class="setting__title">お試し用の入力情報</h3>
+              <p>氏名・電話番号・備考には、実際の個人情報を入力しないでください。</p>
+              <p>お名前：デモテスト<br />電話番号：09000000000<br />備考：動作確認</p>
             </div>
 
             <div class="item">
-              <h3 class="setting__title">個人情報の取り扱い</h3>
-              <p>
-                入力いただいた情報は、予約管理とご連絡の目的にのみ利用します。
-              </p>
+              <h3 class="setting__title">予約の確認・キャンセル</h3>
+              <p>画面下の「予約一覧」から、ご自身のデモ予約を確認できます。キャンセルボタンが表示されている予約は、一覧からキャンセルできます。</p>
+              <p>日時を変更したい場合は、一度キャンセルしてから別の空き枠を選んでください。</p>
             </div>
 
             <div class="item">
-              <h3 class="setting__title">免責事項</h3>
-              <p>
-                通信環境や端末の状態により、表示・予約が正常に行えない場合があります。<br />
-                その際は時間をおいて再度お試しください。
-              </p>
+              <h3 class="setting__title">LINE通知について</h3>
+              <p>デモ用の公式アカウントを友だち追加すると、予約・キャンセルの完了通知をLINEで受け取れます。</p>
             </div>
 
             <div class="item">
-              <p>
-                本アプリは「KID ACADEMY＋ 高岡駅南校」の<br />
-                ご利用者さま向け予約管理ツールです。<br />
-                運営：スケッチ株式会社
-              </p>
+              <h3 class="setting__title">データについて</h3>
+              <p>入力内容と予約情報は、動作確認のためデモ用の保存先に記録されます。また、利用者を識別するためにLINEのユーザー情報を使用します。</p>
+            </div>
+
+            <div class="item">
+              <h3 class="setting__title">表示が更新されない場合</h3>
+              <p>画面を下に引っ張って更新してください。通信エラーが出た場合は、再操作の前に「予約一覧」で登録状況を確認してください。</p>
             </div>
           </div>
         </section>
@@ -1069,51 +1028,26 @@
     </div>
 
     <!-- Cancel Confirm Modal -->
-    <div
-      id="modalOverlay"
-      class="modal-overlay hidden"
-      aria-hidden="true"
-    ></div>
+    <div id="modalOverlay" class="modal-overlay hidden" aria-hidden="true"></div>
 
-    <div
-      id="cancelModal"
-      class="modal hidden"
-      role="dialog"
-      aria-modal="true"
-      aria-labelledby="cancelModalTitle"
-    >
+    <div id="cancelModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="cancelModalTitle">
       <div class="modal-card">
         <div class="modal-head">
           <div id="cancelModalTitle" class="modal-title">キャンセル確認</div>
-          <button
-            type="button"
-            id="cancelModalClose"
-            class="modal-x"
-            aria-label="閉じる"
-          >
-            ×
-          </button>
+          <button type="button" id="cancelModalClose" class="modal-x" aria-label="閉じる">×</button>
         </div>
 
         <div class="modal-body">
-          <div id="cancelModalText" class="modal-text">
-            本当にキャンセルしますか？
-          </div>
+          <div id="cancelModalText" class="modal-text">本当にキャンセルしますか？</div>
 
           <div id="cancelModalMeta" class="modal-meta"></div>
 
-          <div id="cancelModalHint" class="modal-hint">
-            ※キャンセルすると元に戻せません
-          </div>
+          <div id="cancelModalHint" class="modal-hint">※このデモ予約をキャンセルします。再予約は、その時点の空き状況によります。</div>
         </div>
 
         <div class="modal-foot">
-          <button type="button" id="cancelModalNo" class="ghost-btn">
-            やめる
-          </button>
-          <button type="button" id="cancelModalYes" class="danger-btn">
-            キャンセルする
-          </button>
+          <button type="button" id="cancelModalNo" class="ghost-btn">やめる</button>
+          <button type="button" id="cancelModalYes" class="danger-btn">キャンセルする</button>
         </div>
       </div>
     </div>
