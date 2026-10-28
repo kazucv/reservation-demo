@@ -67,7 +67,7 @@ function invalidateCaches_(userId, ymd, idsKey) {
   ]);
 
   const fixedIdsKey = idsKey || getIdsKey_();
-  for (const ym of ymSet) cache.remove(`slots:v2:${ym}:${fixedIdsKey}`);
+  for (const ym of ymSet) cache.remove(`slots:v3:${ym}:${fixedIdsKey}`);
 
   // ✅ 日busyキャッシュ（utils.gs 側）
   const ymdCompact = ymdFixed.replaceAll("-", "");
@@ -104,7 +104,7 @@ function measuredSlotsOriginal_(body) {
   const idsKey = getIdsKey_();
 
   const cache = CacheService.getScriptCache();
-  const cacheKey = `slots:v2:${ym}:${idsKey}`;
+  const cacheKey = `slots:v3:${ym}:${idsKey}`;
 
   const force = (body && (
     body.force === true ||
@@ -113,7 +113,7 @@ function measuredSlotsOriginal_(body) {
   ));
 
   if (!force) {
-    const cached = cache.get(cacheKey);
+    const cached = measurePhase_("monthCacheRead", () => cache.get(cacheKey));
     if (__measureCtx_) __measureCtx_.slotsCache = cached ? "hit" : "miss";
     if (cached) {
       let entry;
@@ -131,8 +131,10 @@ function measuredSlotsOriginal_(body) {
     // force のときはキャッシュを読まずに下へ
   }
 
-  const holidayYmdSet = measurePhase_("holidays", () => getHolidaysYmdSet_(y, m));
-  const excludedYmdSet = measurePhase_("excludedDates", () => getExcludedYmdSet_());
+  // Business settings have their own short cache, independent from live busy data.
+  const business = measurePhase_("businessTotal", () => getCachedBusinessDays_(y, m, force));
+  const holidayYmdSet = new Set(business.holidays);
+  const excludedYmdSet = new Set(business.excluded);
 
   const slots = [];
 
@@ -150,6 +152,8 @@ function measuredSlotsOriginal_(body) {
   // busyAll はこの range で取る
   const busyAll = measurePhase_("busyCalendars", () => getBusySlots(rangeStart, rangeEnd, { force: true }));
 
+
+  const computeStarted_ = Date.now();
 
   // ✅ 日ごとに切り出しておく（ymd -> busy[]）
   const busyByYmd = new Map();
@@ -225,10 +229,11 @@ function measuredSlotsOriginal_(body) {
     }
   }
 
+  if (__measureCtx_) __measureCtx_.ms.slotsCompute = Date.now() - computeStarted_;
   const result = { ok: true, ym, slots };
 
   // ✅ 強制更新でもキャッシュは更新してOK（次から速い）
-  cache.put(cacheKey, JSON.stringify({ savedAt: Date.now(), result }), 60);
+  measurePhase_("monthCacheWrite", () => cache.put(cacheKey, JSON.stringify({ savedAt: Date.now(), result }), 60));
   debugLog('📦 slotsキャッシュ保存', { cacheKey, count: slots.length });
 
   return result;
@@ -897,9 +902,49 @@ function handleApiRequest_(body) {
     const result = measuredApiOriginal_(body);
     const timing = __measureCtx_;
     timing.ms.apiTotal = Date.now() - start;
-    timing.ms.slotsOther = Math.max(0, (timing.ms.slotsTotal || 0) - (timing.ms.holidays || 0) - (timing.ms.excludedDates || 0) - (timing.ms.busyCalendars || 0));
+    timing.version = 2;
+    timing.ms.slotsOther = Math.max(0, (timing.ms.slotsTotal || 0) - ['businessTotal','busyCalendars','monthCacheRead','monthCacheWrite','slotsCompute'].reduce((sum, key) => sum + (timing.ms[key] || 0), 0));
+    timing.ms.apiOther = Math.max(0, timing.ms.apiTotal - (timing.ms.authentication || 0) - (timing.ms.slotsTotal || 0));
     console.log('RESERVATION_TIMING ' + JSON.stringify(timing));
     // Clone: do not add diagnostics to cached business data.
     return Object.assign({}, result, { _timing: timing });
   } finally { __measureCtx_ = null; }
+}
+
+// Display-only business data cache (3 minutes). Reservation mutation paths are unchanged.
+function getCachedBusinessDays_(year, month, force) {
+  const cache = CacheService.getScriptCache();
+  // Includes source IDs so changing the demo's data source cannot reuse another source.
+  const source = [SHEET_ID, EXCLUDED_SHEET_NAME, JP_HOLIDAY_CALENDAR_ID].join('|');
+  const digest = measurePhase_('businessKey', () => Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, source));
+  const signature = digest.map(b => ('0' + (b & 255).toString(16)).slice(-2)).join('').slice(0, 24);
+  const key = `business:v1:${year}:${month}:${signature}`;
+  if (!force) {
+    const raw = measurePhase_('businessCacheRead', () => cache.get(key));
+    if (raw) {
+      let entry;
+      try { entry = JSON.parse(raw); } catch (e) { entry = null; }
+      const age = entry ? Date.now() - entry.savedAt : Infinity;
+      if (entry && Array.isArray(entry.holidays) && Array.isArray(entry.excluded) && age >= 0 && age < 180000) {
+        if (__measureCtx_) __measureCtx_.businessCache = 'hit';
+        return entry;
+      }
+    }
+  }
+  if (__measureCtx_) __measureCtx_.businessCache = force ? 'bypass' : 'miss';
+  // Same normalization and filtering as the existing helpers, but let read failures throw:
+  // do not persist an empty business calendar when the source cannot be read.
+  const holidays = measurePhase_('holidays', () =>
+    (getHolidays(year, month) || []).map(toYmd_).filter(Boolean));
+  const excluded = measurePhase_('excludedDates', () => {
+    const sheet = SpreadsheetApp.openById(SHEET_ID).getSheetByName(EXCLUDED_SHEET_NAME);
+    if (!sheet) throw new Error('Business settings sheet not found');
+    return sheet.getDataRange().getValues()
+      .filter(row => row[0] instanceof Date &&
+        (row[1] === EXCLUDE_STATUS_CLOSED || row[1] === EXCLUDE_STATUS_OPEN))
+      .map(row => toYmd_(row[0])).filter(Boolean);
+  });
+  const entry = { savedAt: Date.now(), holidays, excluded };
+  measurePhase_('businessCacheWrite', () => cache.put(key, JSON.stringify(entry), 180));
+  return entry;
 }
