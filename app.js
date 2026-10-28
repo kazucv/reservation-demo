@@ -10,8 +10,8 @@ document.getElementById('toggleTimingPanels')?.addEventListener('change', event 
   syncTimingPanels_();
 });
 
-// Startup measurement v20261028-16. Times start at browser navigation, not the LINE tap.
-const startupMeasure_ = { version: '20261028-16', jsStart: performance.now(), ms: {}, completed: false };
+// Startup measurement v20261028-17. Times start at browser navigation, not the LINE tap.
+const startupMeasure_ = { version: '20261028-17', jsStart: performance.now(), ms: {}, completed: false };
 async function measureStartupPhase_(name, fn) {
   const start = performance.now();
   try { return await fn(); }
@@ -1913,6 +1913,10 @@ async function run() {
   if (tab === "list") {
     setActiveTab("list");
     await openListView();
+  } else if (tab === "settings") {
+    setActiveTab("settings");
+    showView("settings");
+    log(MSG.settings);
   } else {
     setActiveTab("reserve");
     ensureCalendarView();
