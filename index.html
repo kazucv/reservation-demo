@@ -823,6 +823,9 @@
       .demo-verification { margin-top: 24px; font-size: 13px; color: var(--muted); }
       .timing-toggle { display: flex; align-items: center; gap: 8px; margin-top: 12px; }
       .timing-toggle input { width: 18px; height: 18px; margin: 0; padding: 0; accent-color: #3262cf; }
+      .field-error { color: #b42318; font-size: 13px; line-height: 1.5; margin: 6px 4px 0; }
+      input.input-error, textarea.input-error { box-shadow: inset 0 0 0 2px #c62828; background: #fff5f5; }
+      input.input-error:focus, textarea.input-error:focus { background: #fff5f5; outline: 2px solid #c62828; outline-offset: 2px; }
     </style>
   </head>
 
@@ -924,11 +927,14 @@
 
           <div class="label">お試し用の情報</div>
           <div class="hint">体験デモです。実際の来店予約は行われません。氏名・電話番号・備考には、実際の個人情報を入力しないでください。</div>
-          <input id="name" maxlength="80" placeholder="例：デモテスト" autocomplete="off" />
-          <input id="tel" maxlength="40" placeholder="例：09000000000" inputmode="numeric" autocomplete="off" />
+          <input id="name" aria-label="お名前" aria-describedby="nameError" maxlength="80" placeholder="例：デモテスト" autocomplete="off" />
+          <p id="nameError" class="field-error hidden" role="alert"></p>
+          <input id="tel" aria-label="電話番号" aria-describedby="telError" maxlength="40" placeholder="例：09000000000" inputmode="numeric" autocomplete="off" />
+          <p id="telError" class="field-error hidden" role="alert"></p>
 
           <div class="label">メモ</div>
-          <textarea id="note" maxlength="500" placeholder="例：動作確認（任意）"></textarea>
+          <textarea id="note" aria-label="備考" aria-describedby="noteError" maxlength="500" placeholder="例：動作確認（任意）"></textarea>
+          <p id="noteError" class="field-error hidden" role="alert"></p>
 
           <button id="confirmBtn" class="primary">内容を確認する</button>
           <div class="hint">お名前は80文字以内、電話番号は0から始まる10〜11桁、備考は500文字以内で入力してください。</div>
@@ -1095,6 +1101,6 @@
       </div>
     </div>
 
-    <script src="./app.js?v=20261028-14"></script>
+    <script src="./app.js?v=20261028-15"></script>
   </body>
 </html>

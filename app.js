@@ -10,8 +10,8 @@ document.getElementById('toggleTimingPanels')?.addEventListener('change', event 
   syncTimingPanels_();
 });
 
-// Startup measurement v20261028-14. Times start at browser navigation, not the LINE tap.
-const startupMeasure_ = { version: '20261028-14', jsStart: performance.now(), ms: {}, completed: false };
+// Startup measurement v20261028-15. Times start at browser navigation, not the LINE tap.
+const startupMeasure_ = { version: '20261028-15', jsStart: performance.now(), ms: {}, completed: false };
 async function measureStartupPhase_(name, fn) {
   const start = performance.now();
   try { return await fn(); }
@@ -639,6 +639,7 @@ function clearSlotsUI() {
 }
 
 function resetFormInputs() {
+  for (const field of ['name', 'tel', 'note']) clearReservationFieldError_(field);
   if (nameInput) nameInput.value = "";
   if (telInput) telInput.value = "";
   if (noteInput) noteInput.value = "";
@@ -1091,18 +1092,52 @@ function validateReservationInput_(body) {
   return { ok: true, name, tel, note };
 }
 
+function reservationFieldElements_() {
+  return { name: nameInput, tel: telInput, note: noteInput };
+}
+function clearReservationFieldError_(field) {
+  const input = reservationFieldElements_()[field];
+  input?.removeAttribute('aria-invalid');
+  input?.classList.remove('input-error');
+  const error = document.getElementById(field + 'Error');
+  if (error) { error.textContent = ''; error.classList.add('hidden'); }
+}
+function setReservationFieldError_(field, message, focus = true) {
+  const input = reservationFieldElements_()[field];
+  if (!input) return;
+  input.setAttribute('aria-invalid', 'true');
+  input.classList.add('input-error');
+  const error = document.getElementById(field + 'Error');
+  if (error) { error.textContent = message; error.classList.remove('hidden'); }
+  if (focus) {
+    input.focus();
+    input.scrollIntoView?.({ block: 'center', behavior: 'smooth' });
+  }
+}
 function readReservationInput_() {
+  for (const field of ['name', 'tel', 'note']) clearReservationFieldError_(field);
   const result = validateReservationInput_({ name: nameInput.value, tel: telInput.value, note: noteInput.value });
   if (!result.ok) {
-    log(result.message);
-    const target = { name: nameInput, tel: telInput, note: noteInput }[result.field];
-    target?.focus?.();
+    setReservationFieldError_(result.field, result.message);
+    // Keep the global status concise; the specific message belongs beside the field.
+    log('入力内容をご確認ください。');
   } else {
     nameInput.value = result.name; telInput.value = result.tel; noteInput.value = result.note;
   }
   return result;
 }
-
+for (const [field, input] of Object.entries(reservationFieldElements_())) {
+  input?.addEventListener('input', () => {
+    if (input.getAttribute('aria-invalid') !== 'true') return;
+    const values = { name: '入力確認', tel: '09000000000', note: '' };
+    values[field] = input.value;
+    const checked = validateReservationInput_(values);
+    if (checked.ok) {
+      clearReservationFieldError_(field);
+      if (!Object.values(reservationFieldElements_()).some(el => el?.getAttribute('aria-invalid') === 'true')) log('入力を続けてください。');
+    } else setReservationFieldError_(field, checked.message, false);
+  });
+}
 
 // Demo-only, opt-in test: drop one successful create response locally.
 let simulateLostReservationReply_ = false;
@@ -1242,6 +1277,12 @@ async function reserveSelected() {
       return;
     }
 
+    if (r.data?.code === 'input_invalid' && r.data.field) {
+      showView('form');
+      setReservationFieldError_(r.data.field, r.data.message);
+      log('入力内容をご確認ください。');
+      return;
+    }
     // その他のエラー
     log(`予約できませんでした：${msg || "不明なエラー"}`);
     return;

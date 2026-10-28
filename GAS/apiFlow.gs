@@ -1123,14 +1123,15 @@ function validateReservationInput_(body) {
   return { ok: true, name, tel, note };
 }
 
-// All reservation columns are strings. RichTextValue writes literal text, not formulas.
-// The caller already holds the reservation script lock.
+// Explicit RAW input preserves strings without interpreting formulas or numbers.
+// Requires the Google Sheets advanced service (identifier: Sheets).
 function appendReservationTextRow_(sheet, values) {
-  const rich = values.map(value => {
-    const text = value instanceof Date
-      ? Utilities.formatDate(value, 'Asia/Tokyo', 'yyyy/MM/dd HH:mm:ss')
-      : String(value === null || value === undefined ? '' : value);
-    return SpreadsheetApp.newRichTextValue().setText(text).build();
-  });
-  sheet.getRange(sheet.getLastRow() + 1, 1, 1, rich.length).setRichTextValues([rich]);
+  const rowNumber = sheet.getLastRow() + 1;
+  const strings = values.map(value => value instanceof Date
+    ? Utilities.formatDate(value, 'Asia/Tokyo', 'yyyy/MM/dd HH:mm:ss')
+    : String(value === null || value === undefined ? '' : value));
+  const name = "'" + sheet.getName().replace(/'/g, "''") + "'";
+  const range = `${name}!A${rowNumber}:K${rowNumber}`;
+  SpreadsheetApp.flush();
+  Sheets.Spreadsheets.Values.update({ majorDimension: 'ROWS', values: [strings] }, SHEET_ID, range, { valueInputOption: 'RAW' });
 }
